@@ -8,8 +8,10 @@ Routes
   GET /paperless/stats     Paperless-ngx totals (documents, inbox, tags, ...)
   GET /paperless/tags      Paperless-ngx tags with live document counts, sorted desc
                            optional query: ?limit=10  ?min=1
+  GET /github/stats        Homepage repo-sync counts {deployed, undeployed, total, updated_at}
+  POST /webhook            GitHub App webhook -> immediate repo sync (alias: /github/webhook)
 
-Each provider is enabled only if its *_URL env var is set. Upstream calls are cached
+Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER). Upstream calls are cached
 (CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
 
 Logging (LOG_LEVEL, default INFO) - one line per upstream refresh:
@@ -126,6 +128,16 @@ if os.environ.get("PAPERLESS_URL"):
     auth = "token" if paperless.STATIC_TOKEN else ("username/password" if paperless.USERNAME else "MISSING")
     log.info("paperless provider enabled -> %s (auth: %s)", paperless.BASE, auth)
 
+if os.environ.get("GITHUB_USER"):
+    from providers import github_sync
+    _missing = github_sync.missing_env()
+    if _missing:
+        log.error("github sync disabled - missing env: %s", ", ".join(_missing))
+    else:
+        providers["github"] = True
+        log.info("github sync provider enabled -> %s", github_sync.describe())
+        github_sync.check_config_dir()
+
 
 def route(path, query):
     """Return (status, payload)."""
@@ -152,6 +164,11 @@ def route(path, query):
             tags = tags[: int(query["limit"][0])]
         return 200, tags  # root-level array -> Homepage dynamic-list needs no `items:` path
 
+    if path == "/github/stats":
+        if "github" not in providers:
+            return 404, {"error": "github provider disabled (GITHUB_USER not set or env incomplete)"}
+        return 200, github_sync.get_stats()
+
     return 404, {"error": "not found"}
 
 
@@ -168,9 +185,21 @@ class Handler(BaseHTTPRequestHandler):
             status, payload = 502, {"error": f"upstream error: {_short(exc)}"}
         if status >= 500:
             log.warning("GET %s -> %d (%s)", url.path, status, payload.get("error"))
-        body = json.dumps(payload).encode()
+        self._send(status, json.dumps(payload).encode(), "application/json")
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in ("/webhook", "/github/webhook") or "github" not in providers:
+            return self._send(404, b'{"error": "not found"}', "application/json")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > github_sync.MAX_BODY_BYTES:
+            return self._send(413, b"payload too large", "text/plain")
+        status, text = github_sync.handle_webhook(self.headers, self.rfile.read(length))
+        self._send(status, text.encode(), "text/plain")
+
+    def _send(self, status, body, content_type):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -192,10 +221,12 @@ def _warm_up():
 
 def main():
     if not providers:
-        log.error("No providers enabled - set BOOKORBIT_URL and/or PAPERLESS_URL")
+        log.error("No providers enabled - set BOOKORBIT_URL, PAPERLESS_URL and/or GITHUB_USER (+ HOMEPAGE_CONFIG, HOMEPAGE_GROUP, DOCKHAND_URL)")
     port = int(os.environ.get("PORT", "4321"))
     log.info("stats-proxy listening on :%d, providers=%s, cache=%ss", port, sorted(providers), CACHE_TTL)
     threading.Thread(target=_warm_up, daemon=True).start()
+    if "github" in providers:
+        github_sync.start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
