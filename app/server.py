@@ -11,6 +11,12 @@ Routes
 
 Each provider is enabled only if its *_URL env var is set. Upstream calls are cached
 (CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
+
+Logging (LOG_LEVEL, default INFO) - one line per upstream refresh:
+  bookorbit OK in 0.31s (tracked=10 ...)              successful refresh
+  paperless.stats FAILED (#2, 10.01s): ...            failed refresh, says what is served instead
+  paperless.stats RECOVERED after 3 failed attempts   first success after failures
+Set LOG_LEVEL=WARNING to keep only failures.
 """
 import json
 import logging
@@ -30,12 +36,22 @@ CACHE_TTL = float(os.environ.get("CACHE_TTL_SECS", "60"))
 RETRY_AFTER_FAIL = 15.0  # seconds to serve stale data before retrying a failing upstream
 
 
-class TTLCache:
-    """Caches one callable's result. Thread-safe; serves stale data on upstream errors."""
+def _short(exc, limit=300):
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
-    def __init__(self, name, fn, ttl=CACHE_TTL):
-        self.name, self.fn, self.ttl = name, fn, ttl
+
+class TTLCache:
+    """Caches one callable's result. Thread-safe; serves stale data on upstream errors.
+
+    Every real refresh is logged: OK (duration + short summary), FAILED (error + what is
+    being served instead) and RECOVERED (first success after one or more failures).
+    """
+
+    def __init__(self, name, fn, summarize=None, ttl=CACHE_TTL):
+        self.name, self.fn, self.summarize, self.ttl = name, fn, summarize, ttl
         self.value, self.fetched_at, self.next_try = None, 0.0, 0.0
+        self.failures = 0
         self.lock = threading.Lock()
 
     def get(self):
@@ -45,33 +61,70 @@ class TTLCache:
                 return self.value
             if self.value is not None and now < self.next_try:
                 return self.value  # recently failed; keep serving stale
+
+            started = time.monotonic()
             try:
-                self.value = self.fn()
-                self.fetched_at = time.monotonic()
-                return self.value
+                value = self.fn()
             except NotImplementedError:
                 raise
             except Exception as exc:
-                log.warning("%s refresh failed: %s", self.name, exc)
+                self.failures += 1
+                elapsed = time.monotonic() - started
                 if self.value is None:
+                    log.error("%s FAILED (#%d, %.2fs): %s - no cached data to serve",
+                              self.name, self.failures, elapsed, _short(exc))
                     raise
-                self.next_try = now + RETRY_AFTER_FAIL
+                age = int(time.monotonic() - self.fetched_at)
+                log.warning("%s FAILED (#%d, %.2fs): %s - serving stale data from %ds ago, retry in %ds",
+                            self.name, self.failures, elapsed, _short(exc), age, int(RETRY_AFTER_FAIL))
+                self.next_try = time.monotonic() + RETRY_AFTER_FAIL
                 return self.value
+
+            elapsed = time.monotonic() - started
+            if self.failures:
+                log.info("%s RECOVERED after %d failed attempt(s)", self.name, self.failures)
+                self.failures = 0
+            self.value, self.fetched_at = value, time.monotonic()
+            detail = ""
+            if self.summarize:
+                try:
+                    detail = f" ({self.summarize(value)})"
+                except Exception:
+                    pass  # a summary problem must never affect serving data
+            log.info("%s OK in %.2fs%s", self.name, elapsed, detail)
+            return value
 
 
 # ---- provider wiring -------------------------------------------------------
 providers = {}  # name -> enabled
+caches = []
 
 if os.environ.get("BOOKORBIT_URL"):
     from providers import bookorbit
     providers["bookorbit"] = True
-    _bookorbit = TTLCache("bookorbit", bookorbit.get_stats)
+    _bookorbit = TTLCache(
+        "bookorbit", bookorbit.get_stats,
+        lambda d: "tracked={trackedBooks} started={startedBooks} in_progress={inProgressBooks} "
+                  "completed={completedBooks}".format_map(
+                      {k: d.get(k) for k in ("trackedBooks", "startedBooks", "inProgressBooks", "completedBooks")}),
+    )
+    caches.append(_bookorbit)
+    log.info("bookorbit provider enabled -> %s", bookorbit.BASE)
 
 if os.environ.get("PAPERLESS_URL"):
     from providers import paperless
     providers["paperless"] = True
-    _pl_stats = TTLCache("paperless.stats", paperless.get_stats)
-    _pl_tags = TTLCache("paperless.tags", paperless.get_tags)
+    _pl_stats = TTLCache(
+        "paperless.stats", paperless.get_stats,
+        lambda d: f"documents={d['total']} inbox={d['inbox']} tags={d['tags']} correspondents={d['correspondents']}",
+    )
+    _pl_tags = TTLCache(
+        "paperless.tags", paperless.get_tags,
+        lambda d: f"{len(d)} tags" + (f", top: {d[0]['name']}={d[0]['count']}" if d else ""),
+    )
+    caches += [_pl_stats, _pl_tags]
+    auth = "token" if paperless.STATIC_TOKEN else ("username/password" if paperless.USERNAME else "MISSING")
+    log.info("paperless provider enabled -> %s (auth: %s)", paperless.BASE, auth)
 
 
 def route(path, query):
@@ -112,7 +165,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             status, payload = 400, {"error": "bad query parameter"}
         except Exception as exc:  # upstream down and nothing cached
-            status, payload = 502, {"error": f"upstream error: {exc}"}
+            status, payload = 502, {"error": f"upstream error: {_short(exc)}"}
+        if status >= 500:
+            log.warning("GET %s -> %d (%s)", url.path, status, payload.get("error"))
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -125,11 +180,22 @@ class Handler(BaseHTTPRequestHandler):
             log.debug("%s %s", self.address_string(), fmt % args)
 
 
+def _warm_up():
+    """Fetch once at startup so success/failure shows in the logs right away
+    (failures are already logged by TTLCache) and the first widget request is instant."""
+    for cache in caches:
+        try:
+            cache.get()
+        except Exception:
+            pass
+
+
 def main():
     if not providers:
         log.error("No providers enabled - set BOOKORBIT_URL and/or PAPERLESS_URL")
     port = int(os.environ.get("PORT", "4321"))
     log.info("stats-proxy listening on :%d, providers=%s, cache=%ss", port, sorted(providers), CACHE_TTL)
+    threading.Thread(target=_warm_up, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
