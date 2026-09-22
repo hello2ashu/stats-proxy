@@ -11,11 +11,19 @@ Required env (the provider is skipped, with an error in the log, if any are miss
   DOCKHAND_URL        Dockhand base URL (repos are split into Deployed / Undeployed)
 
 Optional env
-  GITHUB_TOKEN            GitHub PAT for the sync script
+  GITHUB_TOKEN            GitHub PAT for the sync script. Strongly recommended: without one, only
+                          public repos can be seen at all (see EXTRA_ARGS below), and requests are
+                          capped at 60/hour. A classic PAT needs the 'repo' scope (or a fine-grained
+                          PAT with Contents: Read-only) to include private repos.
   DOCKHAND_TOKEN          Dockhand API token
   SYNC_INTERVAL_SECS      seconds between scheduled syncs (default 3600)
   GITHUB_WEBHOOK_SECRET   shared secret of the GitHub App webhook (strongly recommended)
-  EXTRA_ARGS              extra flags for the sync script (default "--show-stars --sort updated")
+  EXTRA_ARGS              extra flags for the sync script (default "--show-stars --sort updated
+                          --include-private"). --include-private is a no-op without GITHUB_TOKEN,
+                          so both public and private repos are read whenever a token is set, and
+                          only public repos otherwise. Every synced repo (private or public) is
+                          written with its own colored visibility dot - see EXTRA_ARGS'
+                          --hide-visibility to turn that off.
   STATS_FILE              stats JSON written by the script (default: repo-stats.json next to HOMEPAGE_CONFIG)
   DOCKHAND_REPOS_PATH, DOCKHAND_URL_ALIAS_MAP, DEPLOYED_SUFFIX, UNDEPLOYED_SUFFIX
                           read directly by the sync script
@@ -43,7 +51,7 @@ HOMEPAGE_CONFIG = os.environ.get("HOMEPAGE_CONFIG", "")
 HOMEPAGE_GROUP = os.environ.get("HOMEPAGE_GROUP", "")
 DOCKHAND_URL = os.environ.get("DOCKHAND_URL", "")
 SYNC_INTERVAL_SECS = int(os.environ.get("SYNC_INTERVAL_SECS", "3600"))
-EXTRA_ARGS = os.environ.get("EXTRA_ARGS", "--show-stars --sort updated").split()
+EXTRA_ARGS = os.environ.get("EXTRA_ARGS", "--show-stars --sort updated --include-private").split()
 WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 STATS_FILE = os.environ.get("STATS_FILE") or (
     os.path.join(os.path.dirname(HOMEPAGE_CONFIG), "repo-stats.json") if HOMEPAGE_CONFIG else ""
@@ -70,8 +78,11 @@ def missing_env():
 
 
 def describe():
+    token_set = bool(os.environ.get("GITHUB_TOKEN"))
+    visibility = "private+public (token set)" if token_set else "public only (no GITHUB_TOKEN)"
     return (f"user={GITHUB_USER} group='{HOMEPAGE_GROUP}' config={HOMEPAGE_CONFIG} "
-            f"interval={SYNC_INTERVAL_SECS}s webhook_secret={'set' if WEBHOOK_SECRET else 'NOT SET'}")
+            f"interval={SYNC_INTERVAL_SECS}s webhook_secret={'set' if WEBHOOK_SECRET else 'NOT SET'} "
+            f"repos={visibility}")
 
 
 def check_config_dir():
