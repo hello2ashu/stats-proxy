@@ -19,11 +19,13 @@ Optional env
   SYNC_INTERVAL_SECS      seconds between scheduled syncs (default 3600)
   GITHUB_WEBHOOK_SECRET   shared secret of the GitHub App webhook (strongly recommended)
   EXTRA_ARGS              extra flags for the sync script (default "--show-stars --sort updated
-                          --include-private"). --include-private is a no-op without GITHUB_TOKEN,
-                          so both public and private repos are read whenever a token is set, and
-                          only public repos otherwise. Every synced repo (private or public) is
-                          written with its own colored visibility dot - see EXTRA_ARGS'
-                          --hide-visibility to turn that off.
+                          --include-private"), parsed shell-style (shlex) so a flag value containing
+                          spaces or commas can be quoted, e.g.:
+                          EXTRA_ARGS=--show-stars --stale-groups "Old Group,Other Old Group"
+                          --include-private is a no-op without GITHUB_TOKEN, so both public and
+                          private repos are read whenever a token is set, and only public repos
+                          otherwise. Every synced repo (private or public) is written with its own
+                          colored visibility dot - see EXTRA_ARGS' --hide-visibility to turn that off.
   STATS_FILE              stats JSON written by the script (default: repo-stats.json next to HOMEPAGE_CONFIG)
   DOCKHAND_REPOS_PATH, DOCKHAND_URL_ALIAS_MAP, DEPLOYED_SUFFIX, UNDEPLOYED_SUFFIX,
   DOCKHAND_STACKS_PATH, DOCKHAND_STACKS_QUERY, DOCKHAND_STACK_ALIAS_MAP,
@@ -48,6 +50,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -61,7 +64,7 @@ HOMEPAGE_CONFIG = os.environ.get("HOMEPAGE_CONFIG", "")
 HOMEPAGE_GROUP = os.environ.get("HOMEPAGE_GROUP", "")
 DOCKHAND_URL = os.environ.get("DOCKHAND_URL", "")
 SYNC_INTERVAL_SECS = int(os.environ.get("SYNC_INTERVAL_SECS", "3600"))
-EXTRA_ARGS = os.environ.get("EXTRA_ARGS", "--show-stars --sort updated --include-private").split()
+EXTRA_ARGS = shlex.split(os.environ.get("EXTRA_ARGS", "--show-stars --sort updated --include-private"))
 WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 STATS_FILE = os.environ.get("STATS_FILE") or (
     os.path.join(os.path.dirname(HOMEPAGE_CONFIG), "repo-stats.json") if HOMEPAGE_CONFIG else ""
