@@ -42,7 +42,7 @@ services:
     environment:
       # --- GitHub -> Homepage sync ---
       GITHUB_USER: hello2ashu
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_TOKEN: ${github_pat}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
@@ -60,7 +60,7 @@ services:
 
       # --- Paperless stats provider ---
       PAPERLESS_URL: http://paperless:8000
-      PAPERLESS_TOKEN: ${PAPERLESS_TOKEN}
+      PAPERLESS_TOKEN: ${paperlesstoken}
     networks:
       - default
       - bookorbit-deploy_default
