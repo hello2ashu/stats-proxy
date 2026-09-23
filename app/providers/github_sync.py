@@ -32,6 +32,11 @@ Optional env
                           detection: a deployed repo is 🟢 unless Dockhand's live /api/stacks?env=1
                           shows one of its containers isn't 'running', in which case it's 🟡 - see the
                           script's own docstring for how repos are matched to stacks and the defaults.
+  LEGEND_STYLE, LEGEND_SUFFIX, BOOKMARKS_FILE, LEGEND_BOOKMARK_GROUP, STALE_GROUPS
+                          read directly by the sync script. LEGEND_STYLE defaults to 'bookmarks'
+                          (small horizontal chips written to bookmarks.yaml, not the GitHub group
+                          itself); pass STALE_GROUPS (comma-separated exact group names) once via
+                          EXTRA_ARGS to clean up leftover groups from an earlier HOMEPAGE_GROUP value.
 
 Endpoints (wired up in server.py)
   GET  /github/stats                {deployed, undeployed, total, updated_at} for a Homepage customapi widget

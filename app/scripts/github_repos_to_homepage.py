@@ -731,10 +731,9 @@ def build_total_entry(user, total_count, shown_count):
 
 def build_legend_entries():
     """Static reference entries explaining every colored dot used across
-    the Deployed/Undeployed groups, rendered as their own small group (see
-    --legend-suffix) so the color coding doesn't have to be memorized or
-    looked up elsewhere. Kept as label-only entries (href '#') since
-    there's nothing to click through to - this is a key, not a service."""
+    the Deployed/Undeployed groups, as full-size services-group entries -
+    used only when --legend-style=services. See build_legend_bookmarks for
+    the default, compact style."""
     def entry(label, description):
         attrs = CommentedMap()
         attrs["href"] = "#"
@@ -750,6 +749,28 @@ def build_legend_entries():
               "No matching Dockhand stack was found for this repo"),
         entry(f"{VISIBILITY_LABELS[True]} Private repo", "Visible only to you / your org on GitHub"),
         entry(f"{VISIBILITY_LABELS[False]} Public repo", "Visible to anyone on GitHub"),
+    ]
+
+
+def build_legend_bookmarks():
+    """The same five legend explanations as build_legend_entries, but
+    shaped for bookmarks.yaml instead of services.yaml (Homepage renders
+    bookmarks as small horizontal chips at the top of the page, rather
+    than full-size cards) - this is the --legend-style=bookmarks default.
+    Each chip's `abbr` is the colored dot itself, so the color is what
+    catches the eye; the name/description carry the explanation."""
+    def entry(name, dot, description):
+        item = CommentedMap()
+        item["abbr"] = dot
+        item["description"] = description
+        return {name: [item]}
+
+    return [
+        entry("Running", STATUS_DEPLOYED_RUNNING, "Deployed - every container in the stack is running"),
+        entry("Down", STATUS_DEPLOYED_DOWN, "Deployed - at least one container in the stack isn't running"),
+        entry("Undeployed", STATUS_UNDEPLOYED, "No matching Dockhand stack was found for this repo"),
+        entry("Private", VISIBILITY_LABELS[True], "Private GitHub repo"),
+        entry("Public", VISIBILITY_LABELS[False], "Public GitHub repo"),
     ]
 
 
@@ -902,10 +923,26 @@ def main():
                     help="Suffix appended to --group for the deployed-repos group (default: ' - Deployed')")
     p.add_argument("--undeployed-suffix", default=os.environ.get("UNDEPLOYED_SUFFIX", " - Undeployed"),
                     help="Suffix appended to --group for the undeployed-repos group (default: ' - Undeployed')")
+    p.add_argument("--legend-style", choices=("bookmarks", "services", "none"),
+                    default=os.environ.get("LEGEND_STYLE", "bookmarks"),
+                    help="How to show the color legend (default: bookmarks). 'bookmarks' writes small, "
+                         "horizontal chips to --bookmarks-file (Homepage's compact bookmarks-bar style, "
+                         "shown at the top of every page rather than inside the GitHub group). "
+                         "'services' writes it as its own full-size services group instead (see "
+                         "--legend-suffix), same visual size as a repo card. 'none' skips it entirely.")
     p.add_argument("--legend-suffix", default=os.environ.get("LEGEND_SUFFIX", " - Legend"),
-                    help="Suffix appended to --group for the color-legend group (default: ' - Legend')")
-    p.add_argument("--hide-legend", action="store_true",
-                    help="Don't write the color-legend group explaining the status/visibility dots.")
+                    help="Suffix appended to --group for the color-legend group when "
+                         "--legend-style=services (default: ' - Legend')")
+    p.add_argument("--bookmarks-file", default=os.environ.get("BOOKMARKS_FILE"),
+                    help="Path to Homepage's bookmarks.yaml, used when --legend-style=bookmarks "
+                         "(default: bookmarks.yaml next to --config)")
+    p.add_argument("--legend-bookmark-group", default=os.environ.get("LEGEND_BOOKMARK_GROUP", "Legend"),
+                    help="Group name for the legend chips in bookmarks.yaml (default: 'Legend')")
+    p.add_argument("--stale-groups", default=os.environ.get("STALE_GROUPS"),
+                    help="Comma-separated, exact services.yaml group names to delete every run. Use this "
+                         "once (or leave it in permanently - deleting an already-gone group is a no-op) "
+                         "to clean up leftovers after renaming --group or --legend-suffix, e.g. "
+                         "'Repo List - Deployed,Repo List - Undeployed,Repo List - Legend'.")
     p.add_argument("--stats-file", default=os.environ.get("STATS_FILE"),
                     help="Path to write a small {deployed, undeployed, total, updated_at} JSON stats file "
                          "(default: repo-stats.json next to --config). Served by webhook_server.py's "
@@ -1056,11 +1093,13 @@ def main():
 
     # Written first so a brand-new config puts the legend above the repo
     # groups (see upsert_group's insert_at) - on later runs its position
-    # is left alone if the person has moved it.
-    if args.hide_legend:
-        data, _ = remove_group(data, legend_group)
-    else:
+    # is left alone if the person has moved it. Only relevant for
+    # --legend-style=services; the 'bookmarks' default writes to a
+    # separate file entirely (see below), and 'none' skips it.
+    if args.legend_style == "services":
         data = upsert_group(data, legend_group, build_legend_entries(), insert_at=0)
+    else:
+        data, _ = remove_group(data, legend_group)
 
     data = upsert_group(data, deployed_group, deployed_entries)
     data = upsert_group(data, undeployed_group, undeployed_entries)
@@ -1069,23 +1108,58 @@ def main():
     # over from before repos were split into Deployed/Undeployed groups.
     data, removed_stale = remove_group(data, args.group)
 
+    # Clean up any other exact group names named via --stale-groups - e.g.
+    # leftovers from a previous --group/--legend-suffix value that's since
+    # been changed. This is a no-op for anything already gone.
+    stale_removed = []
+    if args.stale_groups:
+        for name in (n.strip() for n in args.stale_groups.split(",")):
+            if not name:
+                continue
+            data, removed = remove_group(data, name)
+            if removed:
+                stale_removed.append(name)
+
     if args.dry_run:
         yaml.dump(data, sys.stdout)
-        return
+    else:
+        # Write atomically: build in a temp file, then replace, so a crashed
+        # run never leaves services.yaml half-written.
+        tmp_path = args.config + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f)
+        os.replace(tmp_path, args.config)
 
-    # Write atomically: build in a temp file, then replace, so a crashed
-    # run never leaves services.yaml half-written.
-    tmp_path = args.config + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
-    os.replace(tmp_path, args.config)
+    if args.legend_style == "bookmarks":
+        bookmarks_path = args.bookmarks_file or os.path.join(config_dir, "bookmarks.yaml")
+        b_yaml, b_data = load_or_create_config(bookmarks_path)
+        b_data = upsert_group(b_data, args.legend_bookmark_group, build_legend_bookmarks(), insert_at=0)
+        if args.dry_run:
+            print(f"\n# --- {bookmarks_path} ---")
+            b_yaml.dump(b_data, sys.stdout)
+        else:
+            b_tmp_path = bookmarks_path + ".tmp"
+            with open(b_tmp_path, "w", encoding="utf-8") as f:
+                b_yaml.dump(b_data, f)
+            os.replace(b_tmp_path, bookmarks_path)
+
+    if args.dry_run:
+        return
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     stale_note = f" (removed stale flat group '{args.group}')" if removed_stale else ""
-    legend_note = "" if args.hide_legend else f", legend in '{legend_group}'"
+    if stale_removed:
+        stale_note += f" (removed stale group(s): {', '.join(stale_removed)})"
+    if args.legend_style == "services":
+        legend_note = f", legend in '{legend_group}'"
+    elif args.legend_style == "bookmarks":
+        legend_note = f", legend chips in '{bookmarks_path}'"
+    else:
+        legend_note = ""
     print(f"[{ts}] Wrote {len(deployed_entries)} deployed / {len(undeployed_entries)} undeployed "
           f"repo(s) ({total_count} repo(s) total) to groups '{deployed_group}' / '{undeployed_group}' "
           f"in {args.config}{legend_note}{stale_note}")
+
 
     # Also drop a tiny stats file alongside services.yaml so a Homepage
     # customapi widget can show live deployed/undeployed counts (see
