@@ -1,0 +1,74 @@
+# Standalone Dockhand stack for stats-proxy - independent of bookorbit-deploy.
+#
+# Why separate it:
+#   - Right now stats-proxy's container lives inside bookorbit-deploy's compose
+#     file, so redeploying/restarting Bookorbit also restarts stats-proxy (and
+#     vice versa) even though the two have nothing to do with each other.
+#   - Dockhand's own /api/stacks shows stats-proxy bundled under the
+#     "bookorbit-deploy" stack, not as itself - so this script's per-repo
+#     down-detection (see find_dockhand_stack in github_repos_to_homepage.py)
+#     can only match it indirectly. As its own stack literally named
+#     "stats-proxy", it matches the GitHub repo name exactly, with no alias
+#     mapping needed.
+#   - Update/rollback of stats-proxy's image becomes independent of Bookorbit's.
+#
+# How to switch over:
+#   1. Register this file as its own Dockhand git-backed stack named
+#      "stats-proxy" - ideally pointing straight at the hello2ashu/stats-proxy
+#      GitHub repo if Dockhand supports deploying from an app's own repo, or
+#      as a new stacks/Synology/stats-proxy/deploy.yaml file in whatever repo
+#      Dockhand already syncs your other stacks from (the same place
+#      bookorbit-deploy/deploy.yaml currently lives).
+#   2. Delete the stats-proxy service block from bookorbit-deploy's compose
+#      file and redeploy that stack (it'll drop to just bookorbit + db).
+#   3. Deploy this stack. Container/service names and both external networks
+#      are kept identical to today's, so BOOKORBIT_URL/PAPERLESS_URL below
+#      don't need to change - the embedded Docker DNS resolves a service by
+#      name to any container joined to the same network, regardless of which
+#      compose project it's actually running under.
+#   4. Fill in the ${...} secrets below the same way you do today (Dockhand
+#      secrets, an .env file, or your bws integration - whatever this NAS
+#      already uses for bookorbit-deploy's environment).
+
+services:
+  stats-proxy:
+    image: ghcr.io/hello2ashu/stats-proxy:latest
+    container_name: stats-proxy
+    restart: unless-stopped
+    ports:
+      - "4321:4321"
+    volumes:
+      - /volume1/docker/homepage:/config
+    environment:
+      # --- GitHub -> Homepage sync ---
+      GITHUB_USER: hello2ashu
+      GITHUB_TOKEN: ${github_pat}
+      HOMEPAGE_CONFIG: /config/services.yaml
+      HOMEPAGE_GROUP: GitHub
+      DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
+      DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
+      SYNC_INTERVAL_SECS: "3600"
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+
+      # --- BookOrbit stats provider ---
+      # "bookorbit" is the service name Bookorbit's own compose file gives
+      # it - unchanged by this move, so this still resolves once stats-proxy
+      # joins bookorbit-deploy_default below.
+      BOOKORBIT_URL: http://bookorbit:3211
+      BOOKORBIT_USERNAME: ${BOOKORBIT_USERNAME}
+      BOOKORBIT_PASSWORD: ${BOOKORBIT_PASSWORD}
+
+      # --- Paperless stats provider ---
+      PAPERLESS_URL: http://paperless:8000
+      PAPERLESS_TOKEN: ${paperlesstoken}
+    networks:
+      - default
+      - bookorbit-deploy_default
+      - paperless_default
+
+networks:
+  default: {}
+  bookorbit-deploy_default:
+    external: true
+  paperless_default:
+    external: true
