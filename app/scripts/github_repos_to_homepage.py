@@ -816,14 +816,46 @@ def upsert_group(data, group_name, entries, insert_at=None):
 
 
 def remove_group(data, group_name):
-    """Remove a top-level {group_name: [...]} entry if present. Used to
-    clean up the old flat group left over from before repos were split into
-    Deployed/Undeployed groups."""
+    """Remove a top-level {group_name: [...]} entry if present, unconditionally.
+    Used for --stale-groups, where the person explicitly names an exact
+    group to delete - a deliberate, opt-in action. For the automatic
+    legacy-flat-group cleanup this script does on every run, see
+    remove_stale_flat_group instead, which is careful not to delete a
+    same-named group it didn't write itself."""
     for i, item in enumerate(data):
         if isinstance(item, dict) and group_name in item:
             del data[i]
             return data, True
     return data, False
+
+
+def remove_stale_flat_group(data, group_name):
+    """Remove the top-level {group_name: [...]} entry left over from before
+    repos were split into Deployed/Undeployed groups - but only if it still
+    looks like something this script wrote: every item a plain
+    {name: {href, description, icon?}} with no widget.
+
+    This guards against exactly the collision that happens if a person's
+    --group value (e.g. "GitHub") matches the name of an unrelated group
+    they've hand-authored for something else, like a GitHub profile-stats
+    customapi widget - without this check, every sync would silently
+    delete that group. Returns (data, removed, skipped_non_empty):
+    skipped_non_empty is True when a same-named group existed but looked
+    hand-authored, so main() can warn about it instead of staying silent.
+    """
+    for i, item in enumerate(data):
+        if not (isinstance(item, dict) and group_name in item):
+            continue
+        entries = item[group_name]
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict):
+                    for attrs in entry.values():
+                        if isinstance(attrs, dict) and "widget" in attrs:
+                            return data, False, True
+        del data[i]
+        return data, True, False
+    return data, False, False
 
 
 def load_name_map(path, flag_name, value_desc):
@@ -1105,8 +1137,11 @@ def main():
     data = upsert_group(data, undeployed_group, undeployed_entries)
 
     # Clean up the old flat group (plain --group, e.g. "Repo List") left
-    # over from before repos were split into Deployed/Undeployed groups.
-    data, removed_stale = remove_group(data, args.group)
+    # over from before repos were split into Deployed/Undeployed groups -
+    # but never touch it if it looks hand-authored (has a widget), in case
+    # --group collides with an unrelated group's name (e.g. a GitHub
+    # profile-stats widget group literally called "GitHub").
+    data, removed_stale, skipped_hand_authored = remove_stale_flat_group(data, args.group)
 
     # Clean up any other exact group names named via --stale-groups - e.g.
     # leftovers from a previous --group/--legend-suffix value that's since
@@ -1148,6 +1183,12 @@ def main():
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     stale_note = f" (removed stale flat group '{args.group}')" if removed_stale else ""
+    if skipped_hand_authored:
+        print(f"Warning: a group named '{args.group}' exists in {args.config} but has a widget on "
+              f"one of its items, so it was left alone instead of auto-removed as a stale flat group. "
+              f"If --group is meant to match an unrelated, hand-authored group (e.g. a GitHub "
+              f"profile-stats widget), that's fine - just be aware repos and that group now share a "
+              f"name. If it's actually stale, remove it via --stale-groups instead.", file=sys.stderr)
     if stale_removed:
         stale_note += f" (removed stale group(s): {', '.join(stale_removed)})"
     if args.legend_style == "services":
