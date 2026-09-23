@@ -729,6 +729,30 @@ def build_total_entry(user, total_count, shown_count):
     return {label: attrs}
 
 
+def build_legend_entries():
+    """Static reference entries explaining every colored dot used across
+    the Deployed/Undeployed groups, rendered as their own small group (see
+    --legend-suffix) so the color coding doesn't have to be memorized or
+    looked up elsewhere. Kept as label-only entries (href '#') since
+    there's nothing to click through to - this is a key, not a service."""
+    def entry(label, description):
+        attrs = CommentedMap()
+        attrs["href"] = "#"
+        attrs["description"] = description
+        return {label: attrs}
+
+    return [
+        entry(f"{STATUS_DEPLOYED_RUNNING} Deployed & running",
+              "In Dockhand, every container in the stack is running"),
+        entry(f"{STATUS_DEPLOYED_DOWN} Deployed but down",
+              "In Dockhand, but at least one container in the stack isn't running"),
+        entry(f"{STATUS_UNDEPLOYED} Not deployed",
+              "No matching Dockhand stack was found for this repo"),
+        entry(f"{VISIBILITY_LABELS[True]} Private repo", "Visible only to you / your org on GitHub"),
+        entry(f"{VISIBILITY_LABELS[False]} Public repo", "Visible to anyone on GitHub"),
+    ]
+
+
 def load_or_create_config(path):
     yaml = YAML()
     yaml.preserve_quotes = True
@@ -748,9 +772,13 @@ def load_or_create_config(path):
     return yaml, data
 
 
-def upsert_group(data, group_name, entries):
-    """Replace the list under `group_name` if it exists, else append a new
-    top-level group. `data` is the top-level CommentedSeq of {group: [...]}."""
+def upsert_group(data, group_name, entries, insert_at=None):
+    """Replace the list under `group_name` if it exists, else insert a new
+    top-level group - at `insert_at` if given, else appended at the end.
+    `data` is the top-level CommentedSeq of {group: [...]}. An existing
+    group's position is always left alone (`insert_at` only matters the
+    first time a group is created), so a person's manual reordering of
+    groups on the dashboard survives future syncs."""
     new_seq = CommentedSeq()
     new_seq.extend(entries)
 
@@ -759,7 +787,10 @@ def upsert_group(data, group_name, entries):
             item[group_name] = new_seq
             return data
 
-    data.append({group_name: new_seq})
+    if insert_at is not None:
+        data.insert(insert_at, {group_name: new_seq})
+    else:
+        data.append({group_name: new_seq})
     return data
 
 
@@ -871,6 +902,10 @@ def main():
                     help="Suffix appended to --group for the deployed-repos group (default: ' - Deployed')")
     p.add_argument("--undeployed-suffix", default=os.environ.get("UNDEPLOYED_SUFFIX", " - Undeployed"),
                     help="Suffix appended to --group for the undeployed-repos group (default: ' - Undeployed')")
+    p.add_argument("--legend-suffix", default=os.environ.get("LEGEND_SUFFIX", " - Legend"),
+                    help="Suffix appended to --group for the color-legend group (default: ' - Legend')")
+    p.add_argument("--hide-legend", action="store_true",
+                    help="Don't write the color-legend group explaining the status/visibility dots.")
     p.add_argument("--stats-file", default=os.environ.get("STATS_FILE"),
                     help="Path to write a small {deployed, undeployed, total, updated_at} JSON stats file "
                          "(default: repo-stats.json next to --config). Served by webhook_server.py's "
@@ -1017,6 +1052,16 @@ def main():
 
     deployed_group = args.group + args.deployed_suffix
     undeployed_group = args.group + args.undeployed_suffix
+    legend_group = args.group + args.legend_suffix
+
+    # Written first so a brand-new config puts the legend above the repo
+    # groups (see upsert_group's insert_at) - on later runs its position
+    # is left alone if the person has moved it.
+    if args.hide_legend:
+        data, _ = remove_group(data, legend_group)
+    else:
+        data = upsert_group(data, legend_group, build_legend_entries(), insert_at=0)
+
     data = upsert_group(data, deployed_group, deployed_entries)
     data = upsert_group(data, undeployed_group, undeployed_entries)
 
@@ -1037,9 +1082,10 @@ def main():
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     stale_note = f" (removed stale flat group '{args.group}')" if removed_stale else ""
+    legend_note = "" if args.hide_legend else f", legend in '{legend_group}'"
     print(f"[{ts}] Wrote {len(deployed_entries)} deployed / {len(undeployed_entries)} undeployed "
           f"repo(s) ({total_count} repo(s) total) to groups '{deployed_group}' / '{undeployed_group}' "
-          f"in {args.config}{stale_note}")
+          f"in {args.config}{legend_note}{stale_note}")
 
     # Also drop a tiny stats file alongside services.yaml so a Homepage
     # customapi widget can show live deployed/undeployed counts (see
