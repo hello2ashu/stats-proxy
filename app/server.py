@@ -198,7 +198,7 @@ if os.environ.get("AIRTRAIL_URL"):
     _airtrail = TTLCache("airtrail.stats", airtrail.get_stats,
                           lambda d: f"flights={d.get('stats', {}).get('flights')}")
     caches.append(_airtrail)
-    log.info("airtrail provider enabled -> %s", airtrail.BASE)
+    log.info("airtrail provider enabled -> %s", airtrail.URL)
 
 if os.environ.get("TREK_URL"):
     from providers import trek
@@ -206,7 +206,7 @@ if os.environ.get("TREK_URL"):
     _trek = TTLCache("trek.stats", trek.get_stats,
                       lambda d: f"trips={d.get('total_trips')}")
     caches.append(_trek)
-    log.info("trek provider enabled -> %s", trek.BASE)
+    log.info("trek provider enabled -> %s", trek.URL)
 
 if os.environ.get("PLEX_URL"):
     from providers import plex
