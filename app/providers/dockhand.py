@@ -7,12 +7,20 @@ Env vars:
   DOCKHAND_PASSWORD
   DOCKHAND_API_KEY   used only for /api/self-update/check
 
-VERIFY: /api/containers, /api/resources, /api/activity are placeholders
-inferred from the Homepage widget's field names (running/stopped/paused/
-total, cpu/memory/images/stacks, volumes/events_today/pending_updates) --
-not confirmed against Dockhand's real API. Hit each once after deploying
-and fix paths/field names as needed; the self-update/check path is the
-one field you already had verbatim in services.yaml, so that one's solid.
+Per Homepage's own docs (gethomepage.dev/widgets/services/dockhand), the
+built-in "dockhand" widget makes exactly ONE API call and picks up to 4
+of these 11 fields to display: running, stopped, paused, total, cpu,
+memory, images, volumes, events_today, pending_updates, stacks. That's
+why your dashboard's first three cards showed a consistent, complete
+set of numbers -- they're all reading the same underlying response.
+
+VERIFY (unresolved): the exact endpoint path AND the auth mechanism.
+The docs note "currently supports Dockhand's local authentication only",
+which suggests a session/token login rather than raw HTTP Basic Auth --
+plain basic auth against a guessed path is what returned 401 last time.
+The most reliable fix: open DevTools -> Network tab on your dashboard,
+reload, and copy the exact request Homepage's own widget sends (URL,
+method, headers/cookies). Update _login() and STATS_PATH below to match.
 """
 import os
 import requests
@@ -23,38 +31,36 @@ PASSWORD = os.environ.get("DOCKHAND_PASSWORD", "")
 API_KEY = os.environ.get("DOCKHAND_API_KEY", "")
 TIMEOUT = 5
 
+STATS_PATH = "/api/dashboard"  # VERIFY -- placeholder, confirm via DevTools
+
 
 def get_stats():
-    auth = (USERNAME, PASSWORD)
-
-    r = requests.get(f"{BASE}/api/containers", auth=auth, timeout=TIMEOUT)
+    # VERIFY -- placeholder auth. If Dockhand uses session/token login
+    # instead of Basic Auth, replace this with a login POST that returns
+    # a token/cookie, then attach it to the stats request below.
+    r = requests.get(f"{BASE}{STATS_PATH}", auth=(USERNAME, PASSWORD), timeout=TIMEOUT)
     r.raise_for_status()
-    containers = r.json()
-
-    r = requests.get(f"{BASE}/api/resources", auth=auth, timeout=TIMEOUT)
-    r.raise_for_status()
-    resources = r.json()
-
-    r = requests.get(f"{BASE}/api/activity", auth=auth, timeout=TIMEOUT)
-    r.raise_for_status()
-    activity = r.json()
-
+    data = r.json()
     return {
-        "running": containers.get("running"),
-        "stopped": containers.get("stopped"),
-        "paused": containers.get("paused"),
-        "total": containers.get("total"),
-        "cpu": resources.get("cpu"),
-        "memory": resources.get("memory"),
-        "images": resources.get("images"),
-        "stacks": resources.get("stacks"),
-        "volumes": activity.get("volumes"),
-        "events_today": activity.get("events_today"),
-        "pending_updates": activity.get("pending_updates"),
+        "running": data.get("running"),
+        "stopped": data.get("stopped"),
+        "paused": data.get("paused"),
+        "total": data.get("total"),
+        "cpu": data.get("cpu"),
+        "memory": data.get("memory"),
+        "images": data.get("images"),
+        "stacks": data.get("stacks"),
+        "volumes": data.get("volumes"),
+        "events_today": data.get("events_today"),
+        "pending_updates": data.get("pending_updates"),
     }
 
 
 def get_version():
+    # This one's endpoint/header format is confirmed -- it's the exact
+    # shape your original services.yaml used successfully. If this still
+    # 401s, the DOCKHAND_API_KEY value itself is stale (e.g. rotated
+    # during the credential-rotation cleanup step), not the code.
     headers = {"Authorization": API_KEY, "Accept": "application/json"}
     r = requests.get(f"{BASE}/api/self-update/check", headers=headers, timeout=TIMEOUT)
     r.raise_for_status()
