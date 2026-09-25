@@ -22,3 +22,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4321/health', timeout=3)"
 
 CMD ["python", "server.py"]
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tzdata \
+        curl \
+        wget \
+        openssh-client \
+        iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
