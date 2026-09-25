@@ -2,9 +2,13 @@
 
 Env vars: KARAKEEP_URL, KARAKEEP_API_KEY.
 
-VERIFY: your dashboard shows bookmarks/favorites/archived/highlights (46,
-0, 0, 0) -- confirm those four field names against your instance's
-/api/v1/stats (or equivalent) response.
+Confirmed from Homepage's actual widget.js AND component.jsx source:
+  - endpoint: /api/v1/users/me/stats
+  - fields:   numBookmarks, numFavorites, numArchived, numHighlights
+              (also numLists and numTags are available if you want them
+              on the dashboard too -- not currently mapped in
+              services.yaml, add a field below + a mapping there if so)
+All confirmed exact, not guessed.
 """
 import os
 import requests
@@ -16,12 +20,14 @@ TIMEOUT = 5
 
 def get_stats():
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    r = requests.get(f"{BASE}/api/v1/stats", headers=headers, timeout=TIMEOUT)
+    r = requests.get(f"{BASE}/api/v1/users/me/stats", headers=headers, timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
     return {
-        "bookmarks": data.get("numBookmarks"),    # VERIFY
-        "favorites": data.get("numFavorites"),    # VERIFY
-        "archived": data.get("numArchived"),      # VERIFY
-        "highlights": data.get("numHighlights"),  # VERIFY
+        "bookmarks": data.get("numBookmarks"),
+        "favorites": data.get("numFavorites"),
+        "archived": data.get("numArchived"),
+        "highlights": data.get("numHighlights"),
+        "lists": data.get("numLists"),
+        "tags": data.get("numTags"),
     }
