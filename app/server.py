@@ -137,7 +137,84 @@ if os.environ.get("GITHUB_USER"):
         providers["github"] = True
         log.info("github sync provider enabled -> %s", github_sync.describe())
         github_sync.check_config_dir()
+if os.environ.get("DOCKHAND_URL") and os.environ.get("DOCKHAND_USERNAME"):
+    from providers import dockhand
+    providers["dockhand"] = True
+    _dockhand_stats = TTLCache(
+        "dockhand.stats", dockhand.get_stats,
+        lambda d: "running={running} stopped={stopped} total={total}".format_map(d),
+    )
+    _dockhand_version = TTLCache(
+        "dockhand.version", dockhand.get_version,
+        lambda d: f"updateAvailable={d.get('updateAvailable')}",
+        ttl=3600,
+    )
+    caches += [_dockhand_stats, _dockhand_version]
+    log.info("dockhand provider enabled -> %s", dockhand.BASE)
 
+if os.environ.get("SYNOLOGY_URL"):
+    from providers import synology
+    providers["synology"] = True
+    _synology = TTLCache("synology.stats", synology.get_stats,
+                          lambda d: f"uptime={d.get('uptime')} cpu={d.get('cpu')}")
+    caches.append(_synology)
+    log.info("synology provider enabled -> %s", synology.BASE)
+
+if os.environ.get("TRILIUM_URL"):
+    from providers import trilium
+    providers["trilium"] = True
+    _trilium = TTLCache("trilium.stats", trilium.get_stats,
+                         lambda d: f"notes={d.get('notes')} version={d.get('version')}")
+    caches.append(_trilium)
+    log.info("trilium provider enabled -> %s", trilium.BASE)
+
+if os.environ.get("LINKWARDEN_URL"):
+    from providers import linkwarden
+    providers["linkwarden"] = True
+    _linkwarden = TTLCache("linkwarden.stats", linkwarden.get_stats,
+                            lambda d: f"links={d.get('links')} collections={d.get('collections')}")
+    caches.append(_linkwarden)
+    log.info("linkwarden provider enabled -> %s", linkwarden.BASE)
+
+if os.environ.get("KARAKEEP_URL"):
+    from providers import karakeep
+    providers["karakeep"] = True
+    _karakeep = TTLCache("karakeep.stats", karakeep.get_stats,
+                          lambda d: f"bookmarks={d.get('bookmarks')}")
+    caches.append(_karakeep)
+    log.info("karakeep provider enabled -> %s", karakeep.BASE)
+
+if os.environ.get("DAWARICH_URL"):
+    from providers import dawarich
+    providers["dawarich"] = True
+    _dawarich = TTLCache("dawarich.stats", dawarich.get_stats,
+                          lambda d: f"distance={d.get('totalDistanceKm')}km")
+    caches.append(_dawarich)
+    log.info("dawarich provider enabled -> %s", dawarich.BASE)
+
+if os.environ.get("AIRTRAIL_URL"):
+    from providers import airtrail
+    providers["airtrail"] = True
+    _airtrail = TTLCache("airtrail.stats", airtrail.get_stats,
+                          lambda d: f"flights={d.get('stats', {}).get('flights')}")
+    caches.append(_airtrail)
+    log.info("airtrail provider enabled -> %s", airtrail.BASE)
+
+if os.environ.get("TREK_URL"):
+    from providers import trek
+    providers["trek"] = True
+    _trek = TTLCache("trek.stats", trek.get_stats,
+                      lambda d: f"trips={d.get('total_trips')}")
+    caches.append(_trek)
+    log.info("trek provider enabled -> %s", trek.BASE)
+
+if os.environ.get("PLEX_URL"):
+    from providers import plex
+    providers["plex"] = True
+    _plex = TTLCache("plex.stats", plex.get_stats,
+                      lambda d: f"movies={d.get('movies')} tv={d.get('tvShows')}")
+    caches.append(_plex)
+    log.info("plex provider enabled -> %s", plex.BASE)
 
 def route(path, query):
     """Return (status, payload)."""
@@ -168,6 +245,56 @@ def route(path, query):
         if "github" not in providers:
             return 404, {"error": "github provider disabled (GITHUB_USER not set or env incomplete)"}
         return 200, github_sync.get_stats()
+        
+    if path == "/dockhand/stats":
+        if "dockhand" not in providers:
+            return 404, {"error": "dockhand provider disabled"}
+        return 200, _dockhand_stats.get()
+
+    if path == "/dockhand/version":
+        if "dockhand" not in providers:
+            return 404, {"error": "dockhand provider disabled"}
+        return 200, _dockhand_version.get()
+
+    if path == "/synology/stats":
+        if "synology" not in providers:
+            return 404, {"error": "synology provider disabled"}
+        return 200, _synology.get()
+
+    if path == "/trilium/stats":
+        if "trilium" not in providers:
+            return 404, {"error": "trilium provider disabled"}
+        return 200, _trilium.get()
+
+    if path == "/linkwarden/stats":
+        if "linkwarden" not in providers:
+            return 404, {"error": "linkwarden provider disabled"}
+        return 200, _linkwarden.get()
+
+    if path == "/karakeep/stats":
+        if "karakeep" not in providers:
+            return 404, {"error": "karakeep provider disabled"}
+        return 200, _karakeep.get()
+
+    if path == "/dawarich/stats":
+        if "dawarich" not in providers:
+            return 404, {"error": "dawarich provider disabled"}
+        return 200, _dawarich.get()
+
+    if path == "/airtrail/stats":
+        if "airtrail" not in providers:
+            return 404, {"error": "airtrail provider disabled"}
+        return 200, _airtrail.get()
+
+    if path == "/trek/stats":
+        if "trek" not in providers:
+            return 404, {"error": "trek provider disabled"}
+        return 200, _trek.get()
+
+    if path == "/plex/stats":
+        if "plex" not in providers:
+            return 404, {"error": "plex provider disabled"}
+        return 200, _plex.get()    
 
     return 404, {"error": "not found"}
 

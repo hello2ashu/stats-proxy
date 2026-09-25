@@ -61,6 +61,45 @@ services:
       # --- Paperless stats provider ---
       PAPERLESS_URL: http://paperless:8000
       PAPERLESS_TOKEN: ${paperlesstoken}
+      # Dockhand
+      DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
+      DOCKHAND_USERNAME: ashish
+      DOCKHAND_PASSWORD: ${DOCKHAND_PASSWORD}
+      DOCKHAND_API_KEY: ${DOCKHAND_API_KEY}
+
+      # Synology / NAS
+      SYNOLOGY_URL: https://ashish-syn-nas.synology.me
+      SYNOLOGY_USERNAME: remote_stats
+      SYNOLOGY_PASSWORD: ${SYNOLOGY_PASSWORD}
+      SYNOLOGY_VOLUME: volume_1
+
+      # Trilium
+      TRILIUM_URL: https://trillium.ashish-syn-nas.synology.me
+      TRILIUM_TOKEN: ${TRILIUM_TOKEN}
+
+      # Linkwarden
+      LINKWARDEN_URL: https://linkwarden.ashish-syn-nas.synology.me
+      LINKWARDEN_TOKEN: ${LINKWARDEN_TOKEN}
+
+      # Karakeep
+      KARAKEEP_URL: https://karakeep.ashish-syn-nas.synology.me
+      KARAKEEP_API_KEY: ${KARAKEEP_API_KEY}
+
+      # Dawarich
+      DAWARICH_URL: https://dawarich.ashish-syn-nas.synology.me
+      DAWARICH_API_KEY: ${DAWARICH_API_KEY}
+
+      # Airtrail
+      AIRTRAIL_URL: https://airtrail.ashish-syn-nas.synology.me
+      AIRTRAIL_TOKEN: ${AIRTRAIL_TOKEN}
+
+      # Trek
+      TREK_URL: https://trek.ashish-syn-nas.synology.me
+      TREK_API_KEY: ${TREK_API_KEY}
+
+      # Plex
+      PLEX_URL: https://plex.ashish-syn-nas.synology.me
+      PLEX_TOKEN: ${PLEX_TOKEN}
     networks:
       - default
       - bookorbit-deploy_default
