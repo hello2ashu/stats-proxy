@@ -68,7 +68,7 @@ services:
       DOCKHAND_API_KEY: ${DOCKHAND_API_KEY}
 
       # Synology / NAS
-      SYNOLOGY_URL: https://ashish-syn-nas.synology.me
+      SYNOLOGY_URL: https://ashish-syn-nas.synology.me/webapi/auth.cgi
       SYNOLOGY_USERNAME: remote_stats
       SYNOLOGY_PASSWORD: ${SYNOLOGY_PASSWORD}
       SYNOLOGY_VOLUME: volume_1
@@ -90,11 +90,11 @@ services:
       DAWARICH_API_KEY: ${DAWARICH_API_KEY}
 
       # Airtrail
-      AIRTRAIL_URL: https://airtrail.ashish-syn-nas.synology.me
+      AIRTRAIL_URL: https://airtrail.ashish-syn-nas.synology.me/api/stats
       AIRTRAIL_TOKEN: ${AIRTRAIL_TOKEN}
 
       # Trek
-      TREK_URL: https://trek.ashish-syn-nas.synology.me
+      TREK_URL: https://trek.ashish-syn-nas.synology.me/api/v1/stats
       TREK_API_KEY: ${TREK_API_KEY}
 
       # Plex
