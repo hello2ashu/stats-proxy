@@ -57,11 +57,9 @@ def get_stats():
 
 
 def get_version():
-    # This one's endpoint/header format is confirmed -- it's the exact
-    # shape your original services.yaml used successfully. If this still
-    # 401s, the DOCKHAND_API_KEY value itself is stale (e.g. rotated
-    # during the credential-rotation cleanup step), not the code.
-    headers = {"Authorization": API_KEY, "Accept": "application/json"}
+    # Confirmed via direct curl: requires "Bearer " prefix (raw key alone
+    # returns 401, despite the original services.yaml sending it raw).
+    headers = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
     r = requests.get(f"{BASE}/api/self-update/check", headers=headers, timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
