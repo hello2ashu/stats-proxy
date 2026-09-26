@@ -27,36 +27,36 @@ services:
     environment:
       # --- GitHub -> Homepage sync (existing, unchanged) ---
       GITHUB_USER: hello2ashu
-      GITHUB_TOKEN: ${secret:github_pat}
+      GITHUB_TOKEN: ${github_pat}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
-      DOCKHAND_TOKEN: ${secret:DOCKHAND_TOKEN}
+      DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
       SYNC_INTERVAL_SECS: "600"
-      GITHUB_WEBHOOK_SECRET: ${secret:GITHUB_WEBHOOK_SECRET}
+      GITHUB_WEBHOOK_ ${GITHUB_WEBHOOK_SECRET}
       EXTRA_ARGS: --show-stars --sort updated --include-private --stale-groups "Repo List - Deployed,Repo List - Undeployed,Repo List - Legend"
 
       # --- BookOrbit stats provider (existing, unchanged) ---
       BOOKORBIT_URL: http://bookorbit:3211
-      BOOKORBIT_USERNAME: ${secret:BOOKORBIT_USERNAME}
-      BOOKORBIT_PASSWORD: ${secret:BOOKORBIT_PASSWORD}
+      BOOKORBIT_USERNAME: ${BOOKORBIT_USERNAME}
+      BOOKORBIT_PASSWORD: ${BOOKORBIT_PASSWORD}
 
       # --- Paperless stats provider (existing, unchanged) ---
       PAPERLESS_URL: http://paperless:8000
-      PAPERLESS_TOKEN: ${secret:paperlesstoken}
+      PAPERLESS_TOKEN: ${paperlesstoken}
 
       # --- New providers ---
       DAWARICH_URL: https://dawarich.ashish-syn-nas.synology.me
-      DAWARICH_API_KEY: ${secret:DAWARICH_API_KEY}
+      DAWARICH_API_KEY: ${DAWARICH_API_KEY}
 
       AIRTRAIL_URL: https://airtrail.ashish-syn-nas.synology.me/api/stats
-      AIRTRAIL_TOKEN: ${secret:AIRTRAIL_TOKEN}
+      AIRTRAIL_TOKEN: ${AIRTRAIL_TOKEN}
 
       TREK_URL: https://trek.ashish-syn-nas.synology.me/api/v1/stats
-      TREK_API_KEY: ${secret:TREK_API_KEY}
+      TREK_API_KEY: ${TREK_API_KEY}
 
       PLEX_URL: https://plex.ashish-syn-nas.synology.me
-      PLEX_TOKEN: ${secret:PLEX_TOKEN}
+      PLEX_TOKEN: ${PLEX_TOKEN}
     networks:
       - default
       - bookorbit-deploy_default
