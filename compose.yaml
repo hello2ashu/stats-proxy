@@ -1,34 +1,19 @@
-# Standalone Dockhand stack for stats-proxy - independent of bookorbit-deploy.
+# Final stats-proxy service environment.
 #
-# Why separate it:
-#   - Right now stats-proxy's container lives inside bookorbit-deploy's compose
-#     file, so redeploying/restarting Bookorbit also restarts stats-proxy (and
-#     vice versa) even though the two have nothing to do with each other.
-#   - Dockhand's own /api/stacks shows stats-proxy bundled under the
-#     "bookorbit-deploy" stack, not as itself - so this script's per-repo
-#     down-detection (see find_dockhand_stack in github_repos_to_homepage.py)
-#     can only match it indirectly. As its own stack literally named
-#     "stats-proxy", it matches the GitHub repo name exactly, with no alias
-#     mapping needed.
-#   - Update/rollback of stats-proxy's image becomes independent of Bookorbit's.
+# Everything above the "--- New providers ---" line is your existing,
+# already-working config (GitHub sync, BookOrbit, Paperless) -- unchanged.
+# Only dawarich/airtrail/trek/plex were added as new providers; Dockhand,
+# Synology, Trilium, Linkwarden, and Karakeep were tried here first but
+# ended up on Homepage's own native widgets instead (see services.yaml
+# and the separate Homepage-compose env vars below), so none of their
+# secrets belong in stats-proxy's environment.
 #
-# How to switch over:
-#   1. Register this file as its own Dockhand git-backed stack named
-#      "stats-proxy" - ideally pointing straight at the hello2ashu/stats-proxy
-#      GitHub repo if Dockhand supports deploying from an app's own repo, or
-#      as a new stacks/Synology/stats-proxy/deploy.yaml file in whatever repo
-#      Dockhand already syncs your other stacks from (the same place
-#      bookorbit-deploy/deploy.yaml currently lives).
-#   2. Delete the stats-proxy service block from bookorbit-deploy's compose
-#      file and redeploy that stack (it'll drop to just bookorbit + db).
-#   3. Deploy this stack. Container/service names and both external networks
-#      are kept identical to today's, so BOOKORBIT_URL/PAPERLESS_URL below
-#      don't need to change - the embedded Docker DNS resolves a service by
-#      name to any container joined to the same network, regardless of which
-#      compose project it's actually running under.
-#   4. Fill in the ${...} secrets below the same way you do today (Dockhand
-#      secrets, an .env file, or your bws integration - whatever this NAS
-#      already uses for bookorbit-deploy's environment).
+# Create these Bitwarden Secrets Manager secrets (exact names) before
+# redeploying, if you haven't already:
+#   DAWARICH_API_KEY
+#   AIRTRAIL_TOKEN
+#   TREK_API_KEY
+#   PLEX_TOKEN
 
 services:
   stats-proxy:
@@ -40,66 +25,38 @@ services:
     volumes:
       - /volume1/docker/homepage:/config
     environment:
-      # --- GitHub -> Homepage sync ---
+      # --- GitHub -> Homepage sync (existing, unchanged) ---
       GITHUB_USER: hello2ashu
-      GITHUB_TOKEN: ${github_pat}
+      GITHUB_TOKEN: ${secret:github_pat}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
-#      DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
-      DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
-      SYNC_INTERVAL_SECS: "600"
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
-      EXTRA_ARGS: --show-stars --sort updated --include-private --stale-groups "Repo List - Deployed,Repo List - Undeployed,Repo List - Legend"
-      # --- BookOrbit stats provider ---
-      # "bookorbit" is the service name Bookorbit's own compose file gives
-      # it - unchanged by this move, so this still resolves once stats-proxy
-      # joins bookorbit-deploy_default below.
-      BOOKORBIT_URL: http://bookorbit:3211
-      BOOKORBIT_USERNAME: ${BOOKORBIT_USERNAME}
-      BOOKORBIT_PASSWORD: ${BOOKORBIT_PASSWORD}
-
-      # --- Paperless stats provider ---
-      PAPERLESS_URL: http://paperless:8000
-      PAPERLESS_TOKEN: ${paperlesstoken}
-      # Dockhand
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
-      DOCKHAND_USERNAME: ashish
-      DOCKHAND_PASSWORD: ${DOCKHAND_PASSWORD}
-      DOCKHAND_API_KEY: ${DOCKHAND_API_KEY}
+      DOCKHAND_TOKEN: ${secret:DOCKHAND_TOKEN}
+      SYNC_INTERVAL_SECS: "600"
+      GITHUB_WEBHOOK_SECRET: ${secret:GITHUB_WEBHOOK_SECRET}
+      EXTRA_ARGS: --show-stars --sort updated --include-private --stale-groups "Repo List - Deployed,Repo List - Undeployed,Repo List - Legend"
 
-      # Synology / NAS
-      SYNOLOGY_URL: https://ashish-syn-nas.synology.me/webapi/auth.cgi
-      SYNOLOGY_USERNAME: remote_stats
-      SYNOLOGY_PASSWORD: ${SYNOLOGY_PASSWORD}
-      SYNOLOGY_VOLUME: volume_1
+      # --- BookOrbit stats provider (existing, unchanged) ---
+      BOOKORBIT_URL: http://bookorbit:3211
+      BOOKORBIT_USERNAME: ${secret:BOOKORBIT_USERNAME}
+      BOOKORBIT_PASSWORD: ${secret:BOOKORBIT_PASSWORD}
 
-      # Trilium
-      TRILIUM_URL: https://trillium.ashish-syn-nas.synology.me
-      TRILIUM_TOKEN: ${TRILIUM_TOKEN}
+      # --- Paperless stats provider (existing, unchanged) ---
+      PAPERLESS_URL: http://paperless:8000
+      PAPERLESS_TOKEN: ${secret:paperlesstoken}
 
-      # Linkwarden
-      LINKWARDEN_URL: https://linkwarden.ashish-syn-nas.synology.me
-      LINKWARDEN_TOKEN: ${LINKWARDEN_TOKEN}
-
-      # Karakeep
-      KARAKEEP_URL: https://karakeep.ashish-syn-nas.synology.me
-      KARAKEEP_API_KEY: ${KARAKEEP_API_KEY}
-
-      # Dawarich
+      # --- New providers ---
       DAWARICH_URL: https://dawarich.ashish-syn-nas.synology.me
-      DAWARICH_API_KEY: ${DAWARICH_API_KEY}
+      DAWARICH_API_KEY: ${secret:DAWARICH_API_KEY}
 
-      # Airtrail
       AIRTRAIL_URL: https://airtrail.ashish-syn-nas.synology.me/api/stats
-      AIRTRAIL_TOKEN: ${AIRTRAIL_TOKEN}
+      AIRTRAIL_TOKEN: ${secret:AIRTRAIL_TOKEN}
 
-      # Trek
       TREK_URL: https://trek.ashish-syn-nas.synology.me/api/v1/stats
-      TREK_API_KEY: ${TREK_API_KEY}
+      TREK_API_KEY: ${secret:TREK_API_KEY}
 
-      # Plex
       PLEX_URL: https://plex.ashish-syn-nas.synology.me
-      PLEX_TOKEN: ${PLEX_TOKEN}
+      PLEX_TOKEN: ${secret:PLEX_TOKEN}
     networks:
       - default
       - bookorbit-deploy_default
