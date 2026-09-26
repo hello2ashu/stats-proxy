@@ -33,7 +33,7 @@ services:
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
       DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
       SYNC_INTERVAL_SECS: "600"
-      GITHUB_WEBHOOK_ ${GITHUB_WEBHOOK_SECRET}
+      GITHUB_WEBHOOK_ SECRET: ${GITHUB_WEBHOOK_SECRET}
       EXTRA_ARGS: --show-stars --sort updated --include-private --stale-groups "Repo List - Deployed,Repo List - Undeployed,Repo List - Legend"
 
       # --- BookOrbit stats provider (existing, unchanged) ---
