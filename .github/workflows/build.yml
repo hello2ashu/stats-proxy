@@ -1,4 +1,5 @@
-name: Build and push image to GHCR
+```yaml
+name: Build and push stats-proxy image to GHCR
 
 on:
   push:
@@ -15,10 +16,11 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+
     env:
-      # Optional: if both secrets exist, Dockhand is told to redeploy after each build
       DOCKHAND_STATS_WEBHOOK_URL: ${{ secrets.DOCKHAND_STATS_WEBHOOK_URL }}
       DOCKHAND_STATS_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_STATS_WEBHOOK_SECRET }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,7 +40,6 @@ jobs:
         with:
           context: .
           push: true
-          # amd64 only (your NAS runs amd64). Add ",linux/arm64" and a setup-qemu-action step for ARM.
           platforms: linux/amd64
           tags: |
             ${{ env.IMAGE_NAME }}:latest
@@ -47,19 +48,40 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Notify Dockhand
-        if: success() && env.DOCKHAND_STATS_WEBHOOK_URL != ''
+        if: success() && env.DOCKHAND_STATS_WEBHOOK_URL != '' && env.DOCKHAND_STATS_WEBHOOK_SECRET != ''
+        shell: bash
         run: |
-          PAYLOAD='{}'
+          set -euo pipefail
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "event": "image_pushed",
+            "repository": "${{ github.repository }}",
+            "image": "${{ env.IMAGE_NAME }}",
+            "tag": "latest",
+            "sha": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}"
+          }
+          EOF
+          )
 
           SIGNATURE="sha256=$(printf '%s' "$PAYLOAD" \
             | openssl dgst -sha256 \
             -hmac "$DOCKHAND_STATS_WEBHOOK_SECRET" \
             | awk '{print $NF}')"
 
-          echo "Triggering Dockhand deployment..."
+          echo "Triggering Dockhand deployment for ${IMAGE_NAME}:latest..."
 
-          curl --fail-with-body -X POST "$DOCKHAND_STATS_WEBHOOK_URL" \
+          curl --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 2 \
+            -X POST "$DOCKHAND_STATS_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: push" \
             -H "X-Hub-Signature-256: $SIGNATURE" \
             -d "$PAYLOAD"
+
+          echo "Dockhand notification sent successfully."
+```
