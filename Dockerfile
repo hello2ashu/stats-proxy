@@ -13,7 +13,12 @@ RUN apt-get update \
         wget \
         openssh-client \
         iputils-ping \
-    && rm -rf /var/lib/apt/lists/*
+        dnsutils \
+        traceroute \
+        iproute2 \
+        netcat-openbsd \
+        vim \
+        && rm -rf /var/lib/apt/lists/*
  
 WORKDIR /app
 COPY requirements.txt .
