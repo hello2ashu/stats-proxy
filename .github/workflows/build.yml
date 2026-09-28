@@ -16,10 +16,6 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    env:
-      DOCKHAND_STATS_WEBHOOK_URL: ${{ secrets.DOCKHAND_STATS_WEBHOOK_URL }}
-      DOCKHAND_STATS_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_STATS_WEBHOOK_SECRET }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +30,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push stats-proxy
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -46,17 +42,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ------------------------------------------------------------
+      # Notify Dockhand
+      # ------------------------------------------------------------
       - name: Notify Dockhand
-        if: success() && env.DOCKHAND_STATS_WEBHOOK_URL != '' && env.DOCKHAND_STATS_WEBHOOK_SECRET != ''
+        if: always()
         shell: bash
+        env:
+          DOCKHAND_STATS_WEBHOOK_URL: ${{ secrets.DOCKHAND_STATS_WEBHOOK_URL }}
+          DOCKHAND_STATS_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_STATS_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
 
+          echo "=========================================="
+          echo "Dockhand notification"
+          echo "=========================================="
+
+          # Verify webhook URL
+          if [ -z "${DOCKHAND_STATS_WEBHOOK_URL:-}" ]; then
+            echo "ERROR: DOCKHAND_STATS_WEBHOOK_URL is not configured."
+            exit 1
+          fi
+
+          echo "Webhook URL: configured"
+
+          # Verify webhook secret
+          if [ -z "${DOCKHAND_STATS_WEBHOOK_SECRET:-}" ]; then
+            echo "ERROR: DOCKHAND_STATS_WEBHOOK_SECRET is not configured."
+            exit 1
+          fi
+
+          echo "Webhook secret: configured"
+
+          # JSON payload
           PAYLOAD=$(cat <<EOF
           {
             "event": "image_pushed",
             "repository": "${{ github.repository }}",
-            "image": "${{ env.IMAGE_NAME }}",
+            "image": "${IMAGE_NAME}",
             "tag": "latest",
             "sha": "${{ github.sha }}",
             "branch": "${{ github.ref_name }}"
@@ -64,22 +87,41 @@ jobs:
           EOF
           )
 
+          echo "Payload:"
+          echo "$PAYLOAD"
+
+          # Generate GitHub-compatible HMAC signature
           SIGNATURE="sha256=$(printf '%s' "$PAYLOAD" \
             | openssl dgst -sha256 \
             -hmac "$DOCKHAND_STATS_WEBHOOK_SECRET" \
             | awk '{print $NF}')"
 
-          echo "Triggering Dockhand deployment for ${IMAGE_NAME}:latest..."
+          echo "HMAC signature generated."
+          echo "Sending webhook to Dockhand..."
 
-          curl --fail-with-body \
+          # Send webhook
+          HTTP_STATUS=$(curl \
             --silent \
             --show-error \
+            --output /tmp/dockhand-response.txt \
+            --write-out "%{http_code}" \
             --retry 3 \
             --retry-delay 2 \
-            -X POST "$DOCKHAND_STATS_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: push" \
-            -H "X-Hub-Signature-256: $SIGNATURE" \
-            -d "$PAYLOAD"
+            --request POST \
+            "$DOCKHAND_STATS_WEBHOOK_URL" \
+            --header "Content-Type: application/json" \
+            --header "X-GitHub-Event: push" \
+            --header "X-Hub-Signature-256: $SIGNATURE" \
+            --data "$PAYLOAD")
 
-          echo "Dockhand notification sent successfully."
+          echo "Dockhand HTTP status: $HTTP_STATUS"
+
+          echo "Dockhand response:"
+          cat /tmp/dockhand-response.txt || true
+
+          if [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+            echo "Dockhand notification sent successfully."
+          else
+            echo "ERROR: Dockhand webhook returned HTTP $HTTP_STATUS."
+            exit 1
+          fi
