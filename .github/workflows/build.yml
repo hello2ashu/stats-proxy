@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Optional: if both secrets exist, Dockhand is told to redeploy after each build
-      DOCKHAND_WEBHOOK_URL: ${{ secrets.DOCKHAND_WEBHOOK_URL }}
-      DOCKHAND_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_WEBHOOK_SECRET }}
+      DOCKHAND_STATS_WEBHOOK_URL: ${{ secrets.DOCKHAND_STATS_WEBHOOK_URL }}
+      DOCKHAND_STATS_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_STATS_WEBHOOK_SECRET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,18 +47,18 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Notify Dockhand
-        if: success() && env.DOCKHAND_WEBHOOK_URL != ''
+        if: success() && env.DOCKHAND_STATS_WEBHOOK_URL != ''
         run: |
           PAYLOAD='{}'
 
           SIGNATURE="sha256=$(printf '%s' "$PAYLOAD" \
             | openssl dgst -sha256 \
-            -hmac "$DOCKHAND_WEBHOOK_SECRET" \
+            -hmac "$DOCKHAND_STATS_WEBHOOK_SECRET" \
             | awk '{print $NF}')"
 
           echo "Triggering Dockhand deployment..."
 
-          curl --fail-with-body -X POST "$DOCKHAND_WEBHOOK_URL" \
+          curl --fail-with-body -X POST "$DOCKHAND_STATS_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: push" \
             -H "X-Hub-Signature-256: $SIGNATURE" \
