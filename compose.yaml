@@ -18,7 +18,7 @@
 services:
   stats-proxy:
     image: ghcr.io/hello2ashu/stats-proxy:latest
-    container_name: stats-proxy
+    container_name: 1.stats-proxy
     restart: unless-stopped
     ports:
       - "4321:4321"
