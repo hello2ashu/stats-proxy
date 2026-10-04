@@ -10,8 +10,24 @@ Routes
                            optional query: ?limit=10  ?min=1
   GET /github/stats        Homepage repo-sync counts {deployed, undeployed, total, updated_at}
   POST /webhook            GitHub App webhook -> immediate repo sync (alias: /github/webhook)
+  GET /dockhand/stats      Dockhand container counts {running, stopped, total}
+  GET /dockhand/version    Dockhand update-available flag
+  GET /synology/stats      Synology DiskStation stats (uptime, cpu, ...)
+  GET /trilium/stats       Trilium notes/version
+  GET /linkwarden/stats    Linkwarden links/collections counts
+  GET /karakeep/stats      Karakeep bookmark count
+  GET /dawarich/stats      Dawarich travel-distance stats
+  GET /airtrail/stats      AirTrail flight stats
+  GET /trek/stats          Trek trip stats
+  GET /plex/stats          Plex movie/TV counts
+  GET /festivals           Hindu festival calendar per configured location (default: Seattle,
+                           New Delhi) - scraped from drikpanchang.com, refreshed once a day in
+                           the background (not on-demand, since a full year's scrape is slow)
 
-Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER). Upstream calls are cached
+Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER,
+DOCKHAND_URL+DOCKHAND_USERNAME, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
+DAWARICH_URL, AIRTRAIL_URL, TREK_URL, PLEX_URL). The festivals provider has no required env var
+and is on by default - set FESTIVALS_DISABLED to turn it off. Upstream calls are cached
 (CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
 
 Logging (LOG_LEVEL, default INFO) - one line per upstream refresh:
@@ -137,6 +153,7 @@ if os.environ.get("GITHUB_USER"):
         providers["github"] = True
         log.info("github sync provider enabled -> %s", github_sync.describe())
         github_sync.check_config_dir()
+
 if os.environ.get("DOCKHAND_URL") and os.environ.get("DOCKHAND_USERNAME"):
     from providers import dockhand
     providers["dockhand"] = True
@@ -215,84 +232,14 @@ if os.environ.get("PLEX_URL"):
                       lambda d: f"movies={d.get('movies')} tv={d.get('tvShows')}")
     caches.append(_plex)
     log.info("plex provider enabled -> %s", plex.BASE)
-if os.environ.get("DOCKHAND_URL") and os.environ.get("DOCKHAND_USERNAME"):
-    from providers import dockhand
-    providers["dockhand"] = True
-    _dockhand_stats = TTLCache(
-        "dockhand.stats", dockhand.get_stats,
-        lambda d: "running={running} stopped={stopped} total={total}".format_map(d),
-    )
-    _dockhand_version = TTLCache(
-        "dockhand.version", dockhand.get_version,
-        lambda d: f"updateAvailable={d.get('updateAvailable')}",
-        ttl=3600,
-    )
-    caches += [_dockhand_stats, _dockhand_version]
-    log.info("dockhand provider enabled -> %s", dockhand.BASE)
 
-if os.environ.get("SYNOLOGY_URL"):
-    from providers import synology
-    providers["synology"] = True
-    _synology = TTLCache("synology.stats", synology.get_stats,
-                          lambda d: f"uptime={d.get('uptime')} cpu={d.get('cpu')}")
-    caches.append(_synology)
-    log.info("synology provider enabled -> %s", synology.BASE)
+if not os.environ.get("FESTIVALS_DISABLED"):
+    from providers import festivals
+    providers["festivals"] = True
+    log.info("festivals provider enabled -> locations=%s, fallback_api=%s",
+              sorted(festivals.LOCATIONS), festivals.DRIKPANCHANG_API_URL or "not configured")
 
-if os.environ.get("TRILIUM_URL"):
-    from providers import trilium
-    providers["trilium"] = True
-    _trilium = TTLCache("trilium.stats", trilium.get_stats,
-                         lambda d: f"notes={d.get('notes')} version={d.get('version')}")
-    caches.append(_trilium)
-    log.info("trilium provider enabled -> %s", trilium.BASE)
 
-if os.environ.get("LINKWARDEN_URL"):
-    from providers import linkwarden
-    providers["linkwarden"] = True
-    _linkwarden = TTLCache("linkwarden.stats", linkwarden.get_stats,
-                            lambda d: f"links={d.get('links')} collections={d.get('collections')}")
-    caches.append(_linkwarden)
-    log.info("linkwarden provider enabled -> %s", linkwarden.BASE)
-
-if os.environ.get("KARAKEEP_URL"):
-    from providers import karakeep
-    providers["karakeep"] = True
-    _karakeep = TTLCache("karakeep.stats", karakeep.get_stats,
-                          lambda d: f"bookmarks={d.get('bookmarks')}")
-    caches.append(_karakeep)
-    log.info("karakeep provider enabled -> %s", karakeep.BASE)
-
-if os.environ.get("DAWARICH_URL"):
-    from providers import dawarich
-    providers["dawarich"] = True
-    _dawarich = TTLCache("dawarich.stats", dawarich.get_stats,
-                          lambda d: f"distance={d.get('totalDistanceKm')}km")
-    caches.append(_dawarich)
-    log.info("dawarich provider enabled -> %s", dawarich.BASE)
-
-if os.environ.get("AIRTRAIL_URL"):
-    from providers import airtrail
-    providers["airtrail"] = True
-    _airtrail = TTLCache("airtrail.stats", airtrail.get_stats,
-                          lambda d: f"flights={d.get('stats', {}).get('flights')}")
-    caches.append(_airtrail)
-    log.info("airtrail provider enabled -> %s", airtrail.URL)
-
-if os.environ.get("TREK_URL"):
-    from providers import trek
-    providers["trek"] = True
-    _trek = TTLCache("trek.stats", trek.get_stats,
-                      lambda d: f"trips={d.get('total_trips')}")
-    caches.append(_trek)
-    log.info("trek provider enabled -> %s", trek.URL)
-
-if os.environ.get("PLEX_URL"):
-    from providers import plex
-    providers["plex"] = True
-    _plex = TTLCache("plex.stats", plex.get_stats,
-                      lambda d: f"movies={d.get('movies')} tv={d.get('tvShows')}")
-    caches.append(_plex)
-    log.info("plex provider enabled -> %s", plex.BASE)
 def route(path, query):
     """Return (status, payload)."""
     if path == "/health":
@@ -322,7 +269,7 @@ def route(path, query):
         if "github" not in providers:
             return 404, {"error": "github provider disabled (GITHUB_USER not set or env incomplete)"}
         return 200, github_sync.get_stats()
-        
+
     if path == "/dockhand/stats":
         if "dockhand" not in providers:
             return 404, {"error": "dockhand provider disabled"}
@@ -371,7 +318,12 @@ def route(path, query):
     if path == "/plex/stats":
         if "plex" not in providers:
             return 404, {"error": "plex provider disabled"}
-        return 200, _plex.get()    
+        return 200, _plex.get()
+
+    if path == "/festivals":
+        if "festivals" not in providers:
+            return 404, {"error": "festivals provider disabled (FESTIVALS_DISABLED is set)"}
+        return 200, festivals.get_cached()
 
     return 404, {"error": "not found"}
 
@@ -425,12 +377,16 @@ def _warm_up():
 
 def main():
     if not providers:
-        log.error("No providers enabled - set BOOKORBIT_URL, PAPERLESS_URL and/or GITHUB_USER (+ HOMEPAGE_CONFIG, HOMEPAGE_GROUP, DOCKHAND_URL)")
+        log.error("No providers enabled - set BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER, "
+                   "DOCKHAND_URL(+DOCKHAND_USERNAME), SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, "
+                   "KARAKEEP_URL, DAWARICH_URL, AIRTRAIL_URL, TREK_URL and/or PLEX_URL")
     port = int(os.environ.get("PORT", "4321"))
     log.info("stats-proxy listening on :%d, providers=%s, cache=%ss", port, sorted(providers), CACHE_TTL)
     threading.Thread(target=_warm_up, daemon=True).start()
     if "github" in providers:
         github_sync.start()
+    if "festivals" in providers:
+        festivals.start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
