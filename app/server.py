@@ -23,6 +23,14 @@ Routes
   GET /festivals           Hindu festival calendar per configured location (default: Seattle,
                            New Delhi) - scraped from drikpanchang.com, refreshed once a day in
                            the background (not on-demand, since a full year's scrape is slow)
+  GET /festivals/dashboard Bundle for one widget: upcoming festivals (next UPCOMING_WINDOW_DAYS
+                           days, default 15), editable US + Indian national holiday lists (each
+                           with its next occurrence), and a daily Krishna/Shukla paksha + tithi
+                           reading for one location. Computed on-demand (holiday lists are cheap;
+                           the festivals half reads festivals.py's cache; only the panchang part
+                           makes live requests - see providers/holidays.py). Optional query:
+                           ?location=seattle (default: the first of festivals.LOCATIONS, usually
+                           new_delhi - paksha/tithi are most meaningful for the Indian location)
 
 Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER,
 DOCKHAND_URL+DOCKHAND_USERNAME, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
@@ -234,7 +242,7 @@ if os.environ.get("PLEX_URL"):
     log.info("plex provider enabled -> %s", plex.BASE)
 
 if not os.environ.get("FESTIVALS_DISABLED"):
-    from providers import festivals
+    from providers import festivals, holidays
     providers["festivals"] = True
     log.info("festivals provider enabled -> locations=%s, fallback_api=%s",
               sorted(festivals.LOCATIONS), festivals.DRIKPANCHANG_API_URL or "not configured")
@@ -325,6 +333,14 @@ def route(path, query):
             return 404, {"error": "festivals provider disabled (FESTIVALS_DISABLED is set)"}
         return 200, festivals.get_cached()
 
+    if path == "/festivals/dashboard":
+        if "festivals" not in providers:
+            return 404, {"error": "festivals provider disabled (FESTIVALS_DISABLED is set)"}
+        location = query.get("location", [None])[0]
+        if location and location not in festivals.LOCATIONS:
+            return 400, {"error": f"unknown location {location!r} - configured: {sorted(festivals.LOCATIONS)}"}
+        return 200, holidays.get_dashboard(panchang_location=location)
+
     return 404, {"error": "not found"}
 
 
@@ -387,6 +403,7 @@ def main():
         github_sync.start()
     if "festivals" in providers:
         festivals.start()
+        holidays.start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
