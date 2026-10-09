@@ -59,6 +59,11 @@ logging.basicConfig(
 log = logging.getLogger("stats-proxy")
 
 CACHE_TTL = float(os.environ.get("CACHE_TTL_SECS", "60"))
+# custom.js on the Homepage dashboard fetches /festivals* straight from the browser, which is a
+# cross-origin request, so those routes (and only those) answer with this CORS header. They hold
+# nothing but public holiday/panchang data. Set CORS_ALLOW_ORIGIN to your Homepage origin
+# (e.g. https://homepage.example.com) to lock it down; "-" disables the header entirely.
+CORS_ALLOW_ORIGIN = os.environ.get("CORS_ALLOW_ORIGIN", "*")
 RETRY_AFTER_FAIL = 15.0  # seconds to serve stale data before retrying a failing upstream
 
 
@@ -357,7 +362,8 @@ class Handler(BaseHTTPRequestHandler):
             status, payload = 502, {"error": f"upstream error: {_short(exc)}"}
         if status >= 500:
             log.warning("GET %s -> %d (%s)", url.path, status, payload.get("error"))
-        self._send(status, json.dumps(payload).encode(), "application/json")
+        self._send(status, json.dumps(payload).encode(), "application/json",
+                   cors=url.path.startswith("/festivals"))
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -369,10 +375,12 @@ class Handler(BaseHTTPRequestHandler):
         status, text = github_sync.handle_webhook(self.headers, self.rfile.read(length))
         self._send(status, text.encode(), "text/plain")
 
-    def _send(self, status, body, content_type):
+    def _send(self, status, body, content_type, cors=False):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if cors and CORS_ALLOW_ORIGIN != "-":
+            self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
         self.end_headers()
         self.wfile.write(body)
 
