@@ -1,15 +1,28 @@
+# Stage 1: Build Nushell
+FROM python:3.13-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        build-essential \
+        rustc \
+        cargo \
+        ca-certificates \
+    && cargo install nu --locked
+
+# Stage 2: Production Image
 FROM python:3.13-slim
  
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=America/Los_Angeles
  
-# tzdata so TZ actually takes effect (log timestamps use the container's local time)
-# curl/wget/openssh-client/iputils-ping are general-purpose network utilities kept in the image
+# Core utilities (Removed build-essential, rustc, cargo, pkg-config, and libssl-dev)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
         curl \
+        ca-certificates \
         wget \
         openssh-client \
         iputils-ping \
@@ -18,13 +31,11 @@ RUN apt-get update \
         iproute2 \
         netcat-openbsd \
         vim \
-        pkg-config \
-        libssl-dev \
-        build-essential \
-        rustc \
-        cargo \
-        && cargo install nu --locked && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
  
+# Copy the compiled Nushell binary into a standard system path
+COPY --from=builder /root/.cargo/bin/nu /usr/local/bin/nu
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -38,4 +49,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4321/health', timeout=3)"
  
 CMD ["python", "server.py"]
- 
