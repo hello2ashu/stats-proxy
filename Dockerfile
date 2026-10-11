@@ -2,15 +2,12 @@
 FROM python:3.13-slim AS nushell-fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
 
-# Dynamically download the explicit release based on architecture
+# Fix: Dynamically match and fetch the version using standard arch strings
 RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-      curl -L -o nushell.tar.gz "https://github.com"; \
-    elif [ "$ARCH" = "aarch64" ]; then \
-      curl -L -o nushell.tar.gz "https://github.com"; \
-    else \
-      echo "Unsupported architecture: $ARCH" && exit 1; \
-    fi && \
+    if [ "$ARCH" = "x86_64" ]; then TARGET="x86_64-unknown-linux-musl"; \
+    elif [ "$ARCH" = "aarch64" ]; then TARGET="aarch64-unknown-linux-musl"; \
+    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
+    curl -L "https://github.com{TARGET}.tar.gz" -o nushell.tar.gz && \
     mkdir /nu-extracted && \
     tar -xzf nushell.tar.gz -C /nu-extracted --strip-components=1
 
