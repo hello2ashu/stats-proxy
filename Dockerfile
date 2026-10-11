@@ -1,24 +1,24 @@
 # Stage 1: Fetch Nushell Binary
 FROM python:3.13-slim AS nushell-fetcher
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar \
+    && rm -rf /var/lib/apt/lists/*
 
-# Fix: Corrected the full GitHub release URL pattern with proper $ variable expansion
 RUN ARCH=$(uname -m) && \
     VERSION="0.116.1" && \
     if [ "$ARCH" = "x86_64" ]; then TARGET="x86_64-unknown-linux-musl"; \
     elif [ "$ARCH" = "aarch64" ]; then TARGET="aarch64-unknown-linux-musl"; \
     else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
-    curl -L "https://github.com{VERSION}/nu-${VERSION}-${TARGET}.tar.gz" -o nushell.tar.gz && \
+    curl -fsSL "https://github.com/nushell/nushell/releases/download/${VERSION}/nu-${VERSION}-${TARGET}.tar.gz" -o nushell.tar.gz && \
     mkdir /nu-extracted && \
     tar -xzf nushell.tar.gz -C /nu-extracted --strip-components=1
 
 # Stage 2: Production Image
 FROM python:3.13-slim
- 
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=America/Los_Angeles
- 
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
@@ -33,19 +33,20 @@ RUN apt-get update \
         netcat-openbsd \
         vim \
     && rm -rf /var/lib/apt/lists/*
- 
+
 # Copy the compiled nu binary from Stage 1 extraction folder
 COPY --from=nushell-fetcher /nu-extracted/nu /usr/local/bin/nu
+RUN nu --version
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ .
- 
+
 USER nobody
 EXPOSE 4321
- 
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0', timeout=3)"
- 
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4321/', timeout=3)"
+
 CMD ["python", "server.py"]
