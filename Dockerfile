@@ -18,7 +18,12 @@ RUN apt-get update \
         iproute2 \
         netcat-openbsd \
         vim \
-        && rm -rf /var/lib/apt/lists/*
+        pkg-config \
+        libssl-dev \
+        build-essential \
+        rustc \
+        cargo \
+        && cargo install nu --locked && rm -rf /var/lib/apt/lists/*
  
 WORKDIR /app
 COPY requirements.txt .
