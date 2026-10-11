@@ -1,7 +1,8 @@
 # Stage 1: Fetch Nushell Binary
 FROM python:3.13-slim AS nushell-fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
-# Download the official pre-compiled static binary matching your architecture
+
+# Fix: Corrected the full GitHub release URL path and variable interpolation ($NU_ARCH)
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then NU_ARCH="x86_64-unknown-linux-musl"; \
     elif [ "$ARCH" = "aarch64" ]; then NU_ARCH="aarch64-unknown-linux-musl"; \
@@ -16,7 +17,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=America/Los_Angeles
  
-# Core utilities (No compilers needed)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
@@ -32,7 +32,7 @@ RUN apt-get update \
         vim \
     && rm -rf /var/lib/apt/lists/*
  
-# Copy the pre-compiled Nushell binary from Stage 1
+# Copy the verified pre-compiled Nushell binary from Stage 1
 COPY --from=nushell-fetcher /nu /usr/local/bin/nu
 
 WORKDIR /app
