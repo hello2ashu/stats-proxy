@@ -1,14 +1,13 @@
-# Stage 1: Build Nushell
-FROM python:3.13-slim AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config \
-        libssl-dev \
-        build-essential \
-        rustc \
-        cargo \
-        ca-certificates \
-    && cargo install nu --locked
+# Stage 1: Fetch Nushell Binary
+FROM python:3.13-slim AS nushell-fetcher
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
+# Download the official pre-compiled static binary matching your architecture
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then NU_ARCH="x86_64-unknown-linux-musl"; \
+    elif [ "$ARCH" = "aarch64" ]; then NU_ARCH="aarch64-unknown-linux-musl"; \
+    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
+    curl -L -o nushell.tar.gz "https://github.com{NU_ARCH}.tar.gz" && \
+    tar -xzf nushell.tar.gz --strip-components=1
 
 # Stage 2: Production Image
 FROM python:3.13-slim
@@ -17,7 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=America/Los_Angeles
  
-# Core utilities (Removed build-essential, rustc, cargo, pkg-config, and libssl-dev)
+# Core utilities (No compilers needed)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
@@ -33,8 +32,8 @@ RUN apt-get update \
         vim \
     && rm -rf /var/lib/apt/lists/*
  
-# Copy the compiled Nushell binary into a standard system path
-COPY --from=builder /root/.cargo/bin/nu /usr/local/bin/nu
+# Copy the pre-compiled Nushell binary from Stage 1
+COPY --from=nushell-fetcher /nu /usr/local/bin/nu
 
 WORKDIR /app
 COPY requirements.txt .
@@ -44,8 +43,7 @@ COPY app/ .
 USER nobody
 EXPOSE 4321
  
-# /health never touches upstream apps, so a slow Paperless/BookOrbit can't mark the proxy unhealthy
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4321/health', timeout=3)"
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0', timeout=3)"
  
 CMD ["python", "server.py"]
