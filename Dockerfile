@@ -2,12 +2,13 @@
 FROM python:3.13-slim AS nushell-fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
 
-# Fix: Dynamically match and fetch the version using standard arch strings
+# Fix: Corrected the full GitHub release URL pattern with proper $ variable expansion
 RUN ARCH=$(uname -m) && \
+    VERSION="0.116.1" && \
     if [ "$ARCH" = "x86_64" ]; then TARGET="x86_64-unknown-linux-musl"; \
     elif [ "$ARCH" = "aarch64" ]; then TARGET="aarch64-unknown-linux-musl"; \
     else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
-    curl -L "https://github.com{TARGET}.tar.gz" -o nushell.tar.gz && \
+    curl -L "https://github.com{VERSION}/nu-${VERSION}-${TARGET}.tar.gz" -o nushell.tar.gz && \
     mkdir /nu-extracted && \
     tar -xzf nushell.tar.gz -C /nu-extracted --strip-components=1
 
