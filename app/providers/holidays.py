@@ -54,8 +54,14 @@ from ruamel.yaml import YAML
 
 from . import festivals
 
-_yaml = YAML()
-_yaml.default_flow_style = False
+_io_lock = threading.Lock()  # serialises file seed/read across request threads
+
+
+def _new_yaml():
+    # ruamel's YAML object isn't thread-safe, so use a fresh one per operation
+    y = YAML()
+    y.default_flow_style = False
+    return y
 
 log = logging.getLogger("stats-proxy.holidays")
 
@@ -95,22 +101,25 @@ _WEEKDAY_NUM = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
 
 
 def _load_or_seed(path, default):
-    if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            _yaml.dump(default, f)
-        log.info("seeded editable holiday list at %s (%d entries)", path, len(default))
-        return list(default)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = _yaml.load(f)
-        if not isinstance(data, list):
-            raise ValueError("expected a YAML list of holiday entries")
-        return data
-    except Exception as exc:
-        log.error("couldn't read %s (%s) - using built-in defaults for this refresh "
-                  "without touching your file", path, exc)
-        return list(default)
+    with _io_lock:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _new_yaml().dump(default, f)
+            os.replace(tmp, path)  # atomic: readers never see a half-written file
+            log.info("seeded editable holiday list at %s (%d entries)", path, len(default))
+            return list(default)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _new_yaml().load(f)
+            if not isinstance(data, list):
+                raise ValueError("expected a YAML list of holiday entries")
+            return data
+        except Exception as exc:
+            log.error("couldn't read %s (%s) - using built-in defaults for this refresh "
+                      "without touching your file", path, exc)
+            return list(default)
 
 
 def _nth_weekday_of_month(year, month, weekday_name, nth):
