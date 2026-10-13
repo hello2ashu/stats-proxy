@@ -28,6 +28,7 @@ _session = requests.Session()
 _lock = threading.Lock()
 _token = None
 _token_at = 0.0
+_last_total = None  # last good totalBooks, reused if the new endpoint hiccups
 
 
 def _login():
@@ -44,23 +45,38 @@ def _login():
     log.info("BookOrbit login refreshed.")
 
 
-def _fetch():
+def _get(path):
     return _session.get(
-        f"{BASE}/api/v1/user-statistics/summary",
+        f"{BASE}{path}",
         headers={"Authorization": f"Bearer {_token}"},
         timeout=TIMEOUT,
     )
 
 
 def get_stats():
-    """Returns BookOrbit's user-statistics summary unchanged (trackedBooks, startedBooks, ...)."""
+    """User-statistics summary (trackedBooks, startedBooks, inProgressBooks, completedBooks, ...)
+    plus totalBooks from the library-wide /statistics/summary endpoint."""
+    global _last_total
     with _lock:
         if _token is None or time.monotonic() - _token_at > TOKEN_MAX_AGE:
             _login()
-        r = _fetch()
+        r = _get("/api/v1/user-statistics/summary")
         if r.status_code == 401:  # expired early - retry once with a fresh token
             _login()
-            r = _fetch()
-    if not r.ok:
-        raise RuntimeError(f"Stats fetch failed: {r.status_code} {r.text[:200]}")
-    return r.json()
+            r = _get("/api/v1/user-statistics/summary")
+        if not r.ok:
+            raise RuntimeError(f"Stats fetch failed: {r.status_code} {r.text[:200]}")
+        stats = r.json()
+
+        # Only totalBooks comes from the new endpoint. A failure here must not break
+        # the started/in-progress/completed numbers, so keep the last known total.
+        try:
+            t = _get("/api/v1/statistics/summary")
+            if not t.ok:
+                raise RuntimeError(f"{t.status_code} {t.text[:200]}")
+            _last_total = t.json()["totalBooks"]
+        except Exception as exc:
+            log.warning("totalBooks fetch failed (%s) - using last known value: %s", exc, _last_total)
+
+    stats["totalBooks"] = _last_total
+    return stats

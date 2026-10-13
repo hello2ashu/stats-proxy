@@ -133,11 +133,12 @@ caches = []
 if os.environ.get("BOOKORBIT_URL"):
     from providers import bookorbit
     providers["bookorbit"] = True
-    _bookorbit = TTLCache(
+     _bookorbit = TTLCache(
         "bookorbit", bookorbit.get_stats,
-        lambda d: "tracked={trackedBooks} started={startedBooks} in_progress={inProgressBooks} "
-                  "completed={completedBooks}".format_map(
-                      {k: d.get(k) for k in ("trackedBooks", "startedBooks", "inProgressBooks", "completedBooks")}),
+        lambda d: "total={totalBooks} tracked={trackedBooks} started={startedBooks} "
+                  "in_progress={inProgressBooks} completed={completedBooks}".format_map(
+                      {k: d.get(k) for k in ("totalBooks", "trackedBooks", "startedBooks",
+                                              "inProgressBooks", "completedBooks")}),
     )
     caches.append(_bookorbit)
     log.info("bookorbit provider enabled -> %s", bookorbit.BASE)
