@@ -56,15 +56,52 @@ def get_stats():
     }
 
 
-def get_version():
-    # Confirmed via direct curl: requires "Bearer " prefix (raw key alone
-    # returns 401, despite the original services.yaml sending it raw).
-    headers = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
-    r = requests.get(f"{BASE}/api/self-update/check", headers=headers, timeout=TIMEOUT)
+import re
+import subprocess
+import time
+
+GITHUB_LATEST_URL = "https://api.github.com/repos/Finsys/dockhand/releases/latest"
+CONTAINER_NAME = "Dockhand"
+_VERSION_CACHE = {"ts": 0, "latest": None}
+_CACHE_TTL = 3600  # GitHub's unauthenticated limit is 60 req/hr, so cache for an hour
+
+
+def _parse_version(v):
+    """'v1.2.3' -> (1, 2, 3). Ignores any suffix like '-beta'."""
+    nums = re.findall(r"\d+", v.split("-")[0])
+    return tuple(int(n) for n in nums)
+
+
+def _get_current_version():
+    out = subprocess.run(
+        ["docker", "exec", CONTAINER_NAME,
+         "node", "-p", "require('/app/package.json').version"],
+        capture_output=True, text=True, timeout=TIMEOUT, check=True,
+    )
+    return out.stdout.strip()
+
+
+def _get_latest_version():
+    now = time.time()
+    if _VERSION_CACHE["latest"] and now - _VERSION_CACHE["ts"] < _CACHE_TTL:
+        return _VERSION_CACHE["latest"]
+    r = requests.get(
+        GITHUB_LATEST_URL,
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=TIMEOUT,
+    )
     r.raise_for_status()
-    data = r.json()
+    tag = r.json()["tag_name"]
+    _VERSION_CACHE.update(ts=now, latest=tag)
+    return tag
+
+
+def get_version():
+    current = _get_current_version()
+    latest = _get_latest_version()
+    update_available = _parse_version(latest) > _parse_version(current)
     return {
-        "updateAvailable": data.get("updateAvailable"),
-        "currentImage": data.get("currentImage"),
-        "newImage": data.get("newImage"),
+        "updateAvailable": update_available,   # True / False
+        "currentImage": current,
+        "newImage": latest.lstrip("v"),
     }
