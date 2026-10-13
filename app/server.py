@@ -33,7 +33,7 @@ Routes
                            new_delhi - paksha/tithi are most meaningful for the Indian location)
 
 Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER,
-DOCKHAND_URL+DOCKHAND_USERNAME, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
+DOCKHAND_URL+DOCKHAND_TOKEN, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
 DAWARICH_URL, AIRTRAIL_URL, TREK_URL, PLEX_URL). The festivals provider has no required env var
 and is on by default - set FESTIVALS_DISABLED to turn it off. Upstream calls are cached
 (CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
@@ -168,7 +168,9 @@ if os.environ.get("GITHUB_USER"):
         log.info("github sync provider enabled -> %s", github_sync.describe())
         github_sync.check_config_dir()
 
-if os.environ.get("DOCKHAND_URL") and os.environ.get("DOCKHAND_USERNAME"):
+if os.environ.get("DOCKHAND_URL") and (
+    os.environ.get("DOCKHAND_TOKEN") or os.environ.get("DOCKHAND_API_KEY")
+):
     from providers import dockhand
     providers["dockhand"] = True
     _dockhand_stats = TTLCache(
@@ -286,12 +288,12 @@ def route(path, query):
 
     if path == "/dockhand/stats":
         if "dockhand" not in providers:
-            return 404, {"error": "dockhand provider disabled"}
+            return 404, {"error": "dockhand provider disabled (DOCKHAND_URL/DOCKHAND_TOKEN not set)"}
         return 200, _dockhand_stats.get()
 
     if path == "/dockhand/version":
         if "dockhand" not in providers:
-            return 404, {"error": "dockhand provider disabled"}
+            return 404, {"error": "dockhand provider disabled (DOCKHAND_URL/DOCKHAND_TOKEN not set)"}
         return 200, _dockhand_version.get()
 
     if path == "/synology/stats":
@@ -403,7 +405,7 @@ def _warm_up():
 def main():
     if not providers:
         log.error("No providers enabled - set BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER, "
-                   "DOCKHAND_URL(+DOCKHAND_USERNAME), SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, "
+                   "DOCKHAND_URL(+DOCKHAND_TOKEN), SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, "
                    "KARAKEEP_URL, DAWARICH_URL, AIRTRAIL_URL, TREK_URL and/or PLEX_URL")
     port = int(os.environ.get("PORT", "4321"))
     log.info("stats-proxy listening on :%d, providers=%s, cache=%ss", port, sorted(providers), CACHE_TTL)
