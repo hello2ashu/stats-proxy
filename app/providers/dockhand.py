@@ -1,44 +1,36 @@
 """Dockhand stats provider.
 
 Env vars:
-  DOCKHAND_URL       (already referenced elsewhere in this app per the
-                      startup log message -- same instance, reused here)
-  DOCKHAND_USERNAME
-  DOCKHAND_PASSWORD
-  DOCKHAND_API_KEY   used only for /api/self-update/check
+  DOCKHAND_URL      base URL of the Dockhand instance
+  DOCKHAND_TOKEN    API token (dh_...), sent as "Authorization: Bearer <token>"
+                    (DOCKHAND_API_KEY is accepted as a fallback name)
 
-Per Homepage's own docs (gethomepage.dev/widgets/services/dockhand), the
-built-in "dockhand" widget makes exactly ONE API call and picks up to 4
-of these 11 fields to display: running, stopped, paused, total, cpu,
-memory, images, volumes, events_today, pending_updates, stacks. That's
-why your dashboard's first three cards showed a consistent, complete
-set of numbers -- they're all reading the same underlying response.
-
-VERIFY (unresolved): the exact endpoint path AND the auth mechanism.
-The docs note "currently supports Dockhand's local authentication only",
-which suggests a session/token login rather than raw HTTP Basic Auth --
-plain basic auth against a guessed path is what returned 401 last time.
-The most reliable fix: open DevTools -> Network tab on your dashboard,
-reload, and copy the exact request Homepage's own widget sends (URL,
-method, headers/cookies). Update _login() and STATS_PATH below to match.
+VERIFY: STATS_PATH is still a guess. Test it with:
+  docker exec stats-proxy sh -c 'curl -s -i -H "Authorization: Bearer $DOCKHAND_TOKEN" "$DOCKHAND_URL/api/dashboard"'
+A 200 means it's right. A 404 means copy the real path from DevTools -> Network.
 """
 import os
+import re
+import subprocess
+import time
+
 import requests
 
 BASE = os.environ.get("DOCKHAND_URL", "").rstrip("/")
-USERNAME = os.environ.get("DOCKHAND_USERNAME", "")
-PASSWORD = os.environ.get("DOCKHAND_PASSWORD", "")
-API_KEY = os.environ.get("DOCKHAND_API_KEY", "")
+API_KEY = os.environ.get("DOCKHAND_TOKEN") or os.environ.get("DOCKHAND_API_KEY", "")
+HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
 TIMEOUT = 5
 
-STATS_PATH = "/api/dashboard"  # VERIFY -- placeholder, confirm via DevTools
+STATS_PATH = "/api/dashboard"  # VERIFY -- placeholder
+
+GITHUB_LATEST_URL = "https://api.github.com/repos/Finsys/dockhand/releases/latest"
+CONTAINER_NAME = "Dockhand"
+_VERSION_CACHE = {"ts": 0, "latest": None}
+_CACHE_TTL = 3600  # GitHub's unauthenticated limit is 60 req/hr
 
 
 def get_stats():
-    # VERIFY -- placeholder auth. If Dockhand uses session/token login
-    # instead of Basic Auth, replace this with a login POST that returns
-    # a token/cookie, then attach it to the stats request below.
-    r = requests.get(f"{BASE}{STATS_PATH}", auth=(USERNAME, PASSWORD), timeout=TIMEOUT)
+    r = requests.get(f"{BASE}{STATS_PATH}", headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
     return {
@@ -56,16 +48,6 @@ def get_stats():
     }
 
 
-import re
-import subprocess
-import time
-
-GITHUB_LATEST_URL = "https://api.github.com/repos/Finsys/dockhand/releases/latest"
-CONTAINER_NAME = "Dockhand"
-_VERSION_CACHE = {"ts": 0, "latest": None}
-_CACHE_TTL = 3600  # GitHub's unauthenticated limit is 60 req/hr, so cache for an hour
-
-
 def _parse_version(v):
     """'v1.2.3' -> (1, 2, 3). Ignores any suffix like '-beta'."""
     nums = re.findall(r"\d+", v.split("-")[0])
@@ -73,12 +55,23 @@ def _parse_version(v):
 
 
 def _get_current_version():
-    out = subprocess.run(
-        ["docker", "exec", CONTAINER_NAME,
-         "node", "-p", "require('/app/package.json').version"],
-        capture_output=True, text=True, timeout=TIMEOUT, check=True,
-    )
-    return out.stdout.strip()
+    try:
+        out = subprocess.run(
+            ["docker", "exec", CONTAINER_NAME,
+             "node", "-p", "require('/app/package.json').version"],
+            capture_output=True, text=True, timeout=TIMEOUT, check=True,
+        )
+        return out.stdout.strip()
+    except (FileNotFoundError, subprocess.SubprocessError):
+        # No docker CLI/socket in this container: fall back to the image tag
+        # reported by Dockhand itself (e.g. "finsys/dockhand:v1.2.3" -> "1.2.3").
+        r = requests.get(f"{BASE}/api/self-update/check", headers=HEADERS, timeout=TIMEOUT)
+        r.raise_for_status()
+        image = r.json().get("currentImage") or ""
+        m = re.search(r"\d+(?:\.\d+)+", image)
+        if not m:
+            raise RuntimeError(f"could not determine current version from {image!r}")
+        return m.group(0)
 
 
 def _get_latest_version():
@@ -101,7 +94,7 @@ def get_version():
     latest = _get_latest_version()
     update_available = _parse_version(latest) > _parse_version(current)
     return {
-        "updateAvailable": update_available,   # True / False
+        "updateAvailable": update_available,   # use "yes" if update_available else "no" for text
         "currentImage": current,
         "newImage": latest.lstrip("v"),
     }
