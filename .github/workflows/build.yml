@@ -1,3 +1,4 @@
+# File path: .github/workflows/build-and-push.yml
 name: Build and push stats-proxy image to GHCR
 
 on:
@@ -43,22 +44,62 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ------------------------------------------------------------
-      # Notify Dockhand
+      # Verify Container and Notify Dockhand
       # ------------------------------------------------------------
-      - name: Notify Dockhand
+      - name: Verify Container and Notify Dockhand
         if: always()
+        timeout-minutes: 15
         shell: bash
         env:
           DOCKHAND_STATS_WEBHOOK_URL: ${{ secrets.DOCKHAND_STATS_WEBHOOK_URL }}
           DOCKHAND_STATS_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_STATS_WEBHOOK_SECRET }}
+          CONTAINER_NAME: "stats-proxy" 
         run: |
           set -euo pipefail
+
+          echo "=========================================="
+          echo "Checking Container Status"
+          echo "=========================================="
+
+          CONTAINER_READY=false
+          MAX_ATTEMPTS=30
+          WAIT_SECONDS=10
+
+          for ((i=1; i<=MAX_ATTEMPTS; i++)); do
+            if docker ps --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}$"; then
+              STATUS=$(docker inspect --format='{{rm-ansi .State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "failed")
+              HEALTH=$(docker inspect --format='{{rm-ansi .State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none")
+
+              echo "Attempt $i/$MAX_ATTEMPTS: Container state is '$STATUS', Health is '$HEALTH'"
+
+              if [ "$STATUS" = "running" ]; then
+                if [ "$HEALTH" = "starting" ]; then
+                  echo "Container is running but still starting health checks..."
+                elif [ "$HEALTH" = "unhealthy" ]; then
+                  echo "ERROR: Container is running but reported UNHEALTHY."
+                  exit 1
+                else
+                  echo "Success: Container is up and running."
+                  CONTAINER_READY=true
+                  break
+                fi
+              fi
+            else
+              echo "Attempt $i/$MAX_ATTEMPTS: Container '$CONTAINER_NAME' not found or not running yet."
+            fi
+
+            sleep $WAIT_SECONDS
+          done
+
+          if [ "$CONTAINER_READY" = "false" ]; then
+            echo "ERROR: Container failed to start and stabilize within $((MAX_ATTEMPTS * WAIT_SECONDS)) seconds."
+            exit 1
+          fi
 
           echo "=========================================="
           echo "Dockhand notification"
           echo "=========================================="
 
-          # Verify webhook URL
           if [ -z "${DOCKHAND_STATS_WEBHOOK_URL:-}" ]; then
             echo "ERROR: DOCKHAND_STATS_WEBHOOK_URL is not configured."
             exit 1
@@ -66,7 +107,6 @@ jobs:
 
           echo "Webhook URL: configured"
 
-          # Verify webhook secret
           if [ -z "${DOCKHAND_STATS_WEBHOOK_SECRET:-}" ]; then
             echo "ERROR: DOCKHAND_STATS_WEBHOOK_SECRET is not configured."
             exit 1
@@ -74,7 +114,6 @@ jobs:
 
           echo "Webhook secret: configured"
 
-          # JSON payload
           PAYLOAD=$(cat <<EOF
           {
             "event": "image_pushed",
@@ -90,7 +129,6 @@ jobs:
           echo "Payload:"
           echo "$PAYLOAD"
 
-          # Generate GitHub-compatible HMAC signature
           SIGNATURE="sha256=$(printf '%s' "$PAYLOAD" \
             | openssl dgst -sha256 \
             -hmac "$DOCKHAND_STATS_WEBHOOK_SECRET" \
@@ -99,10 +137,10 @@ jobs:
           echo "HMAC signature generated."
           echo "Sending webhook to Dockhand..."
 
-          # Send webhook
           HTTP_STATUS=$(curl \
             --silent \
             --show-error \
+            --max-time 600 \
             --output /tmp/dockhand-response.txt \
             --write-out "%{http_code}" \
             --retry 3 \
