@@ -10,19 +10,36 @@ US_HOLIDAYS_FILE and INDIAN_HOLIDAYS_FILE are plain YAML files you can hand-
 edit directly - add, remove, or rename an entry and it takes effect on the
 next request (the lists are re-read every time; no redeploy or restart needed). If a file doesn't exist yet, a sensible
 default is written out on first run so there's something to edit. Each
-entry is either a fixed month/day:
+entry is one of:
+
+A fixed month/day:
 
     - name: Independence Day
       month: 7
       day: 4
 
-or a "nth weekday of month" rule for floating holidays (nth: -1 means the
+A "nth weekday of month" rule for floating holidays (nth: -1 means the
 LAST occurrence, e.g. Memorial Day is the last Monday of May):
 
     - name: Thanksgiving Day
       month: 11
       weekday: Thursday
       nth: 4
+
+A movable festival whose date is looked up every year from the scraped
+drikpanchang calendar in festivals.py (so Diwali, Holi etc. update
+themselves). `festival` is one name or a list of aliases; the first match in
+the scraped list for that year wins. If the scrape has no match (e.g. the
+year isn't covered yet) the entry falls back to month/day when present,
+otherwise it is skipped for that year:
+
+    - name: Diwali
+      festival: [Diwali, Deepavali]
+
+    - name: Baisakhi
+      festival: [Baisakhi, Vaisakhi]
+      month: 4          # fallback only
+      day: 14
 
 Daily panchang (paksha/tithi)
 -------------------------------
@@ -39,6 +56,8 @@ Env vars (on top of festivals.py's)
   INDIAN_HOLIDAYS_FILE   path to the editable Indian national holidays YAML (default:
                          indian_national_holidays.yaml next to FESTIVALS_FILE)
   UPCOMING_WINDOW_DAYS   how many days ahead "upcoming festivals" looks (default 15)
+  INDIAN_FESTIVAL_LOCATION  which festivals.LOCATIONS entry supplies dates for `festival:`
+                         rules in the Indian list (default new_delhi)
 """
 import calendar
 import logging
@@ -66,6 +85,7 @@ def _new_yaml():
 log = logging.getLogger("stats-proxy.holidays")
 
 UPCOMING_WINDOW_DAYS = int(os.environ.get("UPCOMING_WINDOW_DAYS", "15"))
+INDIAN_FESTIVAL_LOCATION = os.environ.get("INDIAN_FESTIVAL_LOCATION", "new_delhi")
 
 _festivals_dir = os.path.dirname(festivals.FESTIVALS_FILE) or "."
 US_HOLIDAYS_FILE = os.environ.get("US_HOLIDAYS_FILE") or os.path.join(_festivals_dir, "us_holidays.yaml")
@@ -87,13 +107,30 @@ DEFAULT_US_HOLIDAYS = [
     {"name": "Christmas Day", "month": 12, "day": 25},
 ]
 
-# Fixed-date, gazetted national holidays only - religious/regional festivals
-# are already covered by the full scraped list in festivals.py, so they're
-# deliberately not duplicated here.
+# Only used to seed the file on first run. Fixed-date national holidays plus
+# the major North Indian festivals, whose dates are resolved each year from
+# the scraped festival calendar (see `festival:` rules in the module docstring).
 DEFAULT_INDIAN_HOLIDAYS = [
     {"name": "Republic Day", "month": 1, "day": 26},
+    {"name": "Ambedkar Jayanti", "month": 4, "day": 14},
     {"name": "Independence Day", "month": 8, "day": 15},
     {"name": "Gandhi Jayanti", "month": 10, "day": 2},
+    {"name": "Christmas", "month": 12, "day": 25},
+    {"name": "Lohri", "festival": ["Lohri"], "month": 1, "day": 13},
+    {"name": "Makar Sankranti", "festival": ["Makar Sankranti"], "month": 1, "day": 14},
+    {"name": "Maha Shivaratri", "festival": ["Maha Shivaratri", "Mahashivaratri"]},
+    {"name": "Holi", "festival": ["Holi"]},
+    {"name": "Ram Navami", "festival": ["Ram Navami"]},
+    {"name": "Baisakhi", "festival": ["Baisakhi", "Vaisakhi"], "month": 4, "day": 14},
+    {"name": "Buddha Purnima", "festival": ["Buddha Purnima"]},
+    {"name": "Raksha Bandhan", "festival": ["Raksha Bandhan"]},
+    {"name": "Janmashtami", "festival": ["Janmashtami", "Krishna Janmashtami"]},
+    {"name": "Dussehra", "festival": ["Dussehra", "Vijayadashami"]},
+    {"name": "Karwa Chauth", "festival": ["Karwa Chauth"]},
+    {"name": "Diwali", "festival": ["Diwali", "Deepavali"]},
+    {"name": "Govardhan Puja", "festival": ["Govardhan Puja"]},
+    {"name": "Bhai Dooj", "festival": ["Bhai Dooj"]},
+    {"name": "Guru Nanak Jayanti", "festival": ["Guru Nanak Jayanti", "Guru Nanak Gurpurab"]},
 ]
 
 _WEEKDAY_NUM = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
@@ -131,7 +168,41 @@ def _nth_weekday_of_month(year, month, weekday_name, nth):
     return date(year, month, matches[index])
 
 
-def _occurrences(entries, year):
+# ---- festival lookup for `festival:` rules ----------------------------------
+
+def _indian_location():
+    if INDIAN_FESTIVAL_LOCATION in festivals.LOCATIONS:
+        return INDIAN_FESTIVAL_LOCATION
+    return next(iter(festivals.LOCATIONS), None)
+
+
+def _indian_festival_pool():
+    """All scraped festivals for the Indian location (from festivals.py's cache)."""
+    try:
+        info = festivals.get_cached().get(_indian_location())
+    except Exception:
+        log.exception("couldn't read festivals cache for holiday lookup")
+        return []
+    return info.get("festivals", []) if isinstance(info, dict) else []
+
+
+def _match_festival(aliases, year, pool):
+    """Exact name match first, then whole-word match (so 'Holi' won't hit
+    'Holika Dahan'). Earliest date in `year` wins."""
+    in_year = sorted((f for f in pool if str(f.get("date", "")).startswith(f"{year}-")),
+                     key=lambda f: f["date"])
+    wanted = [a.lower() for a in aliases]
+    for f in in_year:
+        if str(f.get("name", "")).strip().lower() in wanted:
+            return f
+    pats = [re.compile(r"\b" + re.escape(a) + r"\b", re.IGNORECASE) for a in aliases]
+    for f in in_year:
+        if any(p.search(str(f.get("name", ""))) for p in pats):
+            return f
+    return None
+
+
+def _occurrences(entries, year, pool=()):
     """Resolve each holiday-rule entry to an actual date for `year`. Entries
     with a bad/missing rule are skipped with a warning rather than crashing
     the whole list - a typo in a hand-edited file shouldn't take every
@@ -142,15 +213,28 @@ def _occurrences(entries, year):
         if not name:
             log.warning("holiday entry missing 'name', skipped: %r", entry)
             continue
+        d, source_name = None, None
         try:
-            if "day" in entry:
-                d = date(year, int(entry["month"]), int(entry["day"]))
-            else:
-                d = _nth_weekday_of_month(year, int(entry["month"]), entry["weekday"], int(entry["nth"]))
+            if "festival" in entry:
+                aliases = entry["festival"]
+                aliases = [aliases] if isinstance(aliases, str) else list(aliases)
+                f = _match_festival([str(a) for a in aliases], year, pool)
+                if f:
+                    d, source_name = date.fromisoformat(f["date"]), f.get("name")
+            if d is None:
+                if "day" in entry:
+                    d = date(year, int(entry["month"]), int(entry["day"]))
+                elif "weekday" in entry:
+                    d = _nth_weekday_of_month(year, int(entry["month"]),
+                                              entry["weekday"], int(entry["nth"]))
+                else:
+                    log.debug("no scraped date yet for %r in %s, skipped", name, year)
+                    continue
         except Exception as exc:
             log.warning("couldn't resolve a date for holiday %r (%s), skipped", name, exc)
             continue
-        out.append({"name": name, "date": d.isoformat(), "weekday": d.strftime("%A")})
+        out.append({"name": name, "date": d.isoformat(), "weekday": d.strftime("%A"),
+                    "source_name": source_name})
     out.sort(key=lambda h: h["date"])
     return out
 
@@ -160,7 +244,8 @@ def get_us_holidays(year):
 
 
 def get_indian_holidays(year):
-    return _occurrences(_load_or_seed(INDIAN_HOLIDAYS_FILE, DEFAULT_INDIAN_HOLIDAYS), year)
+    return _occurrences(_load_or_seed(INDIAN_HOLIDAYS_FILE, DEFAULT_INDIAN_HOLIDAYS),
+                        year, pool=_indian_festival_pool())
 
 
 def _next_occurrence(occurrences_this_year, occurrences_next_year, today_iso):
@@ -298,27 +383,40 @@ def get_dashboard(panchang_location=None):
     next occurrence highlighted, and a daily panchang window for one
     location (defaults to the first configured location, typically
     'new_delhi' - paksha/tithi are most meaningful for the Indian
-    location; pass panchang_location explicitly for another one)."""
+    location; pass panchang_location explicitly for another one).
+
+    indian_holidays.next skips anything already listed in the Indian
+    location's upcoming_festivals, so the same festival isn't shown twice."""
     today_iso = date.today().isoformat()
     this_year = date.today().year
+
+    upcoming = get_upcoming_festivals()
 
     us_this_year = get_us_holidays(this_year)
     us_next_year = get_us_holidays(this_year + 1)
     in_this_year = get_indian_holidays(this_year)
     in_next_year = get_indian_holidays(this_year + 1)
 
+    in_loc = _indian_location()
+    seen = {(f.get("date"), f.get("name"))
+            for f in upcoming.get(in_loc, {}).get("festivals", [])}
+
+    def _not_already_shown(items):
+        return [h for h in items if (h["date"], h.get("source_name")) not in seen]
+
     location = panchang_location or next(iter(festivals.LOCATIONS), None)
     panchang = get_panchang_window(location) if location else []
 
     return {
-        "upcoming_festivals": get_upcoming_festivals(),
+        "upcoming_festivals": upcoming,
         "us_holidays": {
             "all": us_this_year,
             "next": _next_occurrence(us_this_year, us_next_year, today_iso),
         },
         "indian_holidays": {
             "all": in_this_year,
-            "next": _next_occurrence(in_this_year, in_next_year, today_iso),
+            "next": _next_occurrence(_not_already_shown(in_this_year),
+                                     _not_already_shown(in_next_year), today_iso),
         },
         "panchang": {"location": location, "days": panchang},
     }
