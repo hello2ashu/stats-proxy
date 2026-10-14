@@ -114,18 +114,35 @@ def _get_current_version():
         return json.load(tar.extractfile(member))["version"]
 
 
+# GitHub release check frequency (3/day = every 8 hours)
+CHECKS_PER_DAY = max(1, int(os.environ.get("DOCKHAND_UPDATE_CHECKS_PER_DAY", "3")))
+_CACHE_TTL = 86400 / CHECKS_PER_DAY
+_RETRY_AFTER_ERROR = 900  # if GitHub fails, try again in 15 minutes
+
+
 def _get_latest_version():
     now = time.time()
     if _VERSION_CACHE["latest"] and now - _VERSION_CACHE["ts"] < _CACHE_TTL:
         return _VERSION_CACHE["latest"]
-    r = requests.get(
-        GITHUB_LATEST_URL,
-        headers={"Accept": "application/vnd.github+json"},
-        timeout=TIMEOUT,
-    )
-    r.raise_for_status()
-    tag = r.json()["tag_name"]
+    try:
+        r = requests.get(
+            GITHUB_LATEST_URL,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        tag = r.json()["tag_name"]
+    except Exception as exc:
+        if _VERSION_CACHE["latest"]:
+            # Keep serving the last known release and retry soon, instead of
+            # dropping to the less precise Dockhand fallback.
+            log.warning("GitHub release check failed (%s: %s); keeping %s, retry in %ds",
+                        type(exc).__name__, exc, _VERSION_CACHE["latest"], _RETRY_AFTER_ERROR)
+            _VERSION_CACHE["ts"] = now - _CACHE_TTL + _RETRY_AFTER_ERROR
+            return _VERSION_CACHE["latest"]
+        raise
     _VERSION_CACHE.update(ts=now, latest=tag)
+    log.info("GitHub release check: latest Dockhand is %s", tag)
     return tag
 
 
