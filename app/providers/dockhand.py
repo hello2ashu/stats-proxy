@@ -1,77 +1,107 @@
 """Dockhand stats provider.
 
 Env vars:
-  DOCKHAND_URL      base URL of the Dockhand instance
-  DOCKHAND_TOKEN    API token (dh_...), sent as "Authorization: Bearer <token>"
-                    (DOCKHAND_API_KEY is accepted as a fallback name)
+  DOCKHAND_URL        base URL of the Dockhand instance
+  DOCKHAND_TOKEN      API token (dh_...), sent as "Authorization: Bearer <token>"
+                      (DOCKHAND_API_KEY is accepted as a fallback name)
+  DOCKHAND_ENV        Dockhand environment id for stats (default: 1 = local)
+  DOCKHAND_CONTAINER  name of the Dockhand container (default: Dockhand)
+  DOCKER_SOCK         docker socket path (default: /var/run/docker.sock)
 
-VERIFY: STATS_PATH is still a guess. Test it with:
-  docker exec stats-proxy sh -c 'curl -s -i -H "Authorization: Bearer $DOCKHAND_TOKEN" "$DOCKHAND_URL/api/dashboard"'
-A 200 means it's right. A 404 means copy the real path from DevTools -> Network.
+Current version: read from /app/package.json inside the Dockhand container via the
+Docker socket (same value as `docker exec Dockhand node -p "require('/app/package.json').version"`,
+but needs no docker CLI). Latest version: GitHub releases. If the socket read fails,
+get_version() falls back to Dockhand's own /api/self-update/check flag.
+
+VERIFY: the response shape of /api/dashboard/stats is not documented. Check it with:
+  docker exec stats-proxy sh -c 'curl -s -H "Authorization: Bearer $DOCKHAND_TOKEN" \
+    "$DOCKHAND_URL/api/dashboard/stats?env=1" | python3 -m json.tool'
+and adjust the key names in get_stats() if values come back as null.
 """
+import http.client
+import io
+import json
+import logging
 import os
 import re
-import subprocess
+import socket
+import tarfile
 import time
 
 import requests
+
+log = logging.getLogger("stats-proxy.dockhand")
 
 BASE = os.environ.get("DOCKHAND_URL", "").rstrip("/")
 API_KEY = os.environ.get("DOCKHAND_TOKEN") or os.environ.get("DOCKHAND_API_KEY", "")
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
 TIMEOUT = 5
 
-STATS_PATH = "/api/dashboard"  # VERIFY -- placeholder
+STATS_PATH = "/api/dashboard/stats"
+ENV_ID = os.environ.get("DOCKHAND_ENV", "1")
 
 GITHUB_LATEST_URL = "https://api.github.com/repos/Finsys/dockhand/releases/latest"
-CONTAINER_NAME = "Dockhand"
+CONTAINER_NAME = os.environ.get("DOCKHAND_CONTAINER", "Dockhand")
+DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 _VERSION_CACHE = {"ts": 0, "latest": None}
 _CACHE_TTL = 3600  # GitHub's unauthenticated limit is 60 req/hr
 
 
+# ---- stats -----------------------------------------------------------------
+def _find(data, key):
+    """Look for key at top level, then inside a nested 'containers' dict."""
+    if key in data:
+        return data[key]
+    nested = data.get("containers")
+    if isinstance(nested, dict):
+        return nested.get(key)
+    return None
+
+
 def get_stats():
-    r = requests.get(f"{BASE}{STATS_PATH}", headers=HEADERS, timeout=TIMEOUT)
+    r = requests.get(f"{BASE}{STATS_PATH}", params={"env": ENV_ID},
+                     headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
-    return {
-        "running": data.get("running"),
-        "stopped": data.get("stopped"),
-        "paused": data.get("paused"),
-        "total": data.get("total"),
-        "cpu": data.get("cpu"),
-        "memory": data.get("memory"),
-        "images": data.get("images"),
-        "stacks": data.get("stacks"),
-        "volumes": data.get("volumes"),
-        "events_today": data.get("events_today"),
-        "pending_updates": data.get("pending_updates"),
-    }
+    keys = ("running", "stopped", "paused", "total", "cpu", "memory", "images",
+            "stacks", "volumes", "events_today", "pending_updates")
+    return {k: _find(data, k) for k in keys}
 
 
+# ---- version ---------------------------------------------------------------
 def _parse_version(v):
     """'v1.2.3' -> (1, 2, 3). Ignores any suffix like '-beta'."""
     nums = re.findall(r"\d+", v.split("-")[0])
     return tuple(int(n) for n in nums)
 
 
+class _UnixConn(http.client.HTTPConnection):
+    """HTTP over a unix socket, so no docker CLI or extra packages are needed."""
+
+    def __init__(self, path, timeout=TIMEOUT):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
 def _get_current_version():
+    """Same value as: docker exec Dockhand node -p "require('/app/package.json').version"."""
+    conn = _UnixConn(DOCKER_SOCK)
     try:
-        out = subprocess.run(
-            ["docker", "exec", CONTAINER_NAME,
-             "node", "-p", "require('/app/package.json').version"],
-            capture_output=True, text=True, timeout=TIMEOUT, check=True,
-        )
-        return out.stdout.strip()
-    except (FileNotFoundError, subprocess.SubprocessError):
-        # No docker CLI/socket in this container: fall back to the image tag
-        # reported by Dockhand itself (e.g. "finsys/dockhand:v1.2.3" -> "1.2.3").
-        r = requests.get(f"{BASE}/api/self-update/check", headers=HEADERS, timeout=TIMEOUT)
-        r.raise_for_status()
-        image = r.json().get("currentImage") or ""
-        m = re.search(r"\d+(?:\.\d+)+", image)
-        if not m:
-            raise RuntimeError(f"could not determine current version from {image!r}")
-        return m.group(0)
+        conn.request("GET", f"/containers/{CONTAINER_NAME}/archive?path=/app/package.json")
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status != 200:
+            raise RuntimeError(f"docker API {resp.status}: {body[:200]!r}")
+    finally:
+        conn.close()
+    with tarfile.open(fileobj=io.BytesIO(body)) as tar:
+        member = tar.getmembers()[0]  # the archive holds just package.json
+        return json.load(tar.extractfile(member))["version"]
 
 
 def _get_latest_version():
@@ -90,11 +120,24 @@ def _get_latest_version():
 
 
 def get_version():
-    current = _get_current_version()
-    latest = _get_latest_version()
-    update_available = _parse_version(latest) > _parse_version(current)
-    return {
-        "updateAvailable": update_available,   # use "yes" if update_available else "no" for text
-        "currentImage": current,
-        "newImage": latest.lstrip("v"),
-    }
+    try:
+        current = _get_current_version()
+        latest = _get_latest_version()
+        update_available = _parse_version(latest) > _parse_version(current)
+        return {
+            "updateAvailable": update_available,   # use "yes" if update_available else "no" for text
+            "currentImage": current,
+            "newImage": latest.lstrip("v"),
+        }
+    except Exception as exc:
+        # Socket not mounted / GitHub unreachable: trust Dockhand's own flag instead.
+        log.warning("version check via socket+GitHub failed (%s: %s); using /api/self-update/check",
+                    type(exc).__name__, exc)
+        r = requests.get(f"{BASE}/api/self-update/check", headers=HEADERS, timeout=TIMEOUT)
+        r.raise_for_status()
+        d = r.json()
+        return {
+            "updateAvailable": d.get("updateAvailable"),
+            "currentImage": d.get("currentImage"),
+            "newImage": d.get("newImage"),
+        }
