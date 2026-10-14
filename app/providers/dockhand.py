@@ -1,22 +1,23 @@
 """Dockhand stats provider.
 
 Env vars:
-  DOCKHAND_URL        base URL of the Dockhand instance
-  DOCKHAND_TOKEN      API token (dh_...), sent as "Authorization: Bearer <token>"
-                      (DOCKHAND_API_KEY is accepted as a fallback name)
-  DOCKHAND_ENV        Dockhand environment id for stats (default: 1 = local)
-  DOCKHAND_CONTAINER  name of the Dockhand container (default: Dockhand)
-  DOCKER_SOCK         docker socket path (default: /var/run/docker.sock)
+  DOCKHAND_URL            base URL of the Dockhand instance
+  DOCKHAND_TOKEN          API token (dh_...), sent as "Authorization: Bearer <token>"
+                          (DOCKHAND_API_KEY is accepted as a fallback name)
+  DOCKHAND_ENV            Dockhand environment id for stats (default: 1 = local)
+  DOCKHAND_CONTAINER      name of the Dockhand container (default: Dockhand)
+  DOCKHAND_STATS_TIMEOUT  seconds to wait for /api/dashboard/stats (default: 30)
+  DOCKER_SOCK             docker socket path (default: /var/run/docker.sock)
+
+Stats: GET /api/dashboard/stats?env=<id>. Response shape (verified):
+  containers{total,running,stopped,paused,restarting,unhealthy,pendingUpdates},
+  images{total}, volumes{total}, stacks{total}, events{total,today},
+  metrics{cpuPercent,memoryPercent,...}
 
 Current version: read from /app/package.json inside the Dockhand container via the
 Docker socket (same value as `docker exec Dockhand node -p "require('/app/package.json').version"`,
-but needs no docker CLI). Latest version: GitHub releases. If the socket read fails,
-get_version() falls back to Dockhand's own /api/self-update/check flag.
-
-VERIFY: the response shape of /api/dashboard/stats is not documented. Check it with:
-  docker exec stats-proxy sh -c 'curl -s -H "Authorization: Bearer $DOCKHAND_TOKEN" \
-    "$DOCKHAND_URL/api/dashboard/stats?env=1" | python3 -m json.tool'
-and adjust the key names in get_stats() if values come back as null.
+but needs no docker CLI). Latest version: GitHub releases. If the socket read or the
+GitHub call fails, get_version() falls back to Dockhand's own /api/self-update/check flag.
 """
 import http.client
 import io
@@ -49,24 +50,32 @@ _CACHE_TTL = 3600  # GitHub's unauthenticated limit is 60 req/hr
 
 
 # ---- stats -----------------------------------------------------------------
-def _find(data, key):
-    """Look for key at top level, then inside a nested 'containers' dict."""
-    if key in data:
-        return data[key]
-    nested = data.get("containers")
-    if isinstance(nested, dict):
-        return nested.get(key)
-    return None
+def _r1(v):
+    return round(v, 1) if isinstance(v, (int, float)) else v
 
 
 def get_stats():
     r = requests.get(f"{BASE}{STATS_PATH}", params={"env": ENV_ID},
                      headers=HEADERS, timeout=STATS_TIMEOUT)
     r.raise_for_status()
-    data = r.json()
-    keys = ("running", "stopped", "paused", "total", "cpu", "memory", "images",
-            "stacks", "volumes", "events_today", "pending_updates")
-    return {k: _find(data, k) for k in keys}
+    d = r.json()
+    c = d.get("containers") or {}
+    m = d.get("metrics") or {}
+    return {
+        "running": c.get("running"),
+        "stopped": c.get("stopped"),
+        "paused": c.get("paused"),
+        "total": c.get("total"),
+        "restarting": c.get("restarting"),
+        "unhealthy": c.get("unhealthy"),
+        "cpu": _r1(m.get("cpuPercent")),            # percent
+        "memory": _r1(m.get("memoryPercent")),      # percent
+        "images": (d.get("images") or {}).get("total"),
+        "volumes": (d.get("volumes") or {}).get("total"),
+        "stacks": (d.get("stacks") or {}).get("total"),
+        "events_today": (d.get("events") or {}).get("today"),
+        "pending_updates": c.get("pendingUpdates"),
+    }
 
 
 # ---- version ---------------------------------------------------------------
