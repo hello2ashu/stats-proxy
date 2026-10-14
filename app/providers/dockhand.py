@@ -38,6 +38,7 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}", "Accept": "application/json"}
 TIMEOUT = 5
 
 STATS_PATH = "/api/dashboard/stats"
+STATS_TIMEOUT = float(os.environ.get("DOCKHAND_STATS_TIMEOUT", "30"))
 ENV_ID = os.environ.get("DOCKHAND_ENV", "1")
 
 GITHUB_LATEST_URL = "https://api.github.com/repos/Finsys/dockhand/releases/latest"
@@ -60,7 +61,7 @@ def _find(data, key):
 
 def get_stats():
     r = requests.get(f"{BASE}{STATS_PATH}", params={"env": ENV_ID},
-                     headers=HEADERS, timeout=TIMEOUT)
+                     headers=HEADERS, timeout=STATS_TIMEOUT)
     r.raise_for_status()
     data = r.json()
     keys = ("running", "stopped", "paused", "total", "cpu", "memory", "images",
