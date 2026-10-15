@@ -36,10 +36,10 @@ services:
         Ashish: ${ashish_cal}
         Ashish.3.Goel: ${ashish3goel_cal}
         Heritage: ${heritage_cal}
-     CALENDAR_TZ: America/Los_Angeles     # decides which "day" an event belongs to
-     # CALENDAR_DEDUPE: day               # day (default) | time | off
-     # CALENDAR_CACHE_SECS: 900
-     CORS_ALLOW_ORIGIN: https://homepage.your-nas.synology.me   # see the privacy note below
+      CALENDAR_TZ: America/Los_Angeles     # decides which "day" an event belongs to
+      # CALENDAR_DEDUPE: day               # day (default) | time | off
+      # CALENDAR_CACHE_SECS: 900
+      CORS_ALLOW_ORIGIN: https://homepage.your-nas.synology.me   # see the privacy note below
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
       DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
       DOCKHAND_CONTAINER: Dockhand
