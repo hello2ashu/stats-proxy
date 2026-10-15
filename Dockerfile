@@ -32,6 +32,7 @@ RUN apt-get update \
         iproute2 \
         netcat-openbsd \
         vim \
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled nu binary from Stage 1 extraction folder
