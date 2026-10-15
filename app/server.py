@@ -31,6 +31,7 @@ Routes
                            makes live requests - see providers/holidays.py). Optional query:
                            ?location=seattle (default: the first of festivals.LOCATIONS, usually
                            new_delhi - paksha/tithi are most meaningful for the Indian location)
+  GET /calendar/events     Merged, de-duplicated appointments from several iCal feeds (CALENDAR_URLS)                     
 
 Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER,
 DOCKHAND_URL+DOCKHAND_TOKEN, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
@@ -248,7 +249,19 @@ if os.environ.get("PLEX_URL"):
                       lambda d: f"movies={d.get('movies')} tv={d.get('tvShows')}")
     caches.append(_plex)
     log.info("plex provider enabled -> %s", plex.BASE)
-
+    
+if os.environ.get("CALENDAR_URLS"):
+    from providers import calendar_ical
+    providers["calendar"] = True
+    _calendar = TTLCache(
+        "calendar.events", calendar_ical.get_events,
+        lambda d: f"events={len(d['events'])} feeds={len(d['calendars'])} "
+                  f"duplicates_removed={d['duplicates_removed']}",
+        ttl=calendar_ical.CACHE_SECS,
+    )
+    caches.append(_calendar)
+    log.info("calendar provider enabled -> %s", calendar_ical.describe())
+    
 if not os.environ.get("FESTIVALS_DISABLED"):
     from providers import festivals, holidays
     providers["festivals"] = True
@@ -335,6 +348,11 @@ def route(path, query):
         if "plex" not in providers:
             return 404, {"error": "plex provider disabled"}
         return 200, _plex.get()
+        
+    if path == "/calendar/events":
+        if "calendar" not in providers:
+            return 404, {"error": "calendar provider disabled (CALENDAR_URLS not set)"}
+        return 200, _calendar.get()    
 
     if path == "/festivals":
         if "festivals" not in providers:
@@ -366,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
         if status >= 500:
             log.warning("GET %s -> %d (%s)", url.path, status, payload.get("error"))
         self._send(status, json.dumps(payload).encode(), "application/json",
-                   cors=url.path.startswith("/festivals"))
+                   cors=url.path.startswith(("/festivals", "/calendar")))
 
     def do_POST(self):
         path = urlparse(self.path).path

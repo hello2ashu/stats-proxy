@@ -32,6 +32,14 @@ services:
       GITHUB_TOKEN: ${github_pat}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
+      CALENDAR_URLS: |
+        Family=https://calendar.google.com/calendar/ical/XXXX/private-YYYY/basic.ics
+        Work=webcal://outlook.office365.com/owa/calendar/ZZZZ/calendar.ics
+        School=https://example.org/events.ics
+     CALENDAR_TZ: America/Los_Angeles     # decides which "day" an event belongs to
+     # CALENDAR_DEDUPE: day               # day (default) | time | off
+     # CALENDAR_CACHE_SECS: 900
+     CORS_ALLOW_ORIGIN: https://homepage.your-nas.synology.me   # see the privacy note below
       DOCKHAND_URL: https://dockhand.ashish-syn-nas.synology.me
       DOCKHAND_TOKEN: ${DOCKHAND_TOKEN}
       DOCKHAND_CONTAINER: Dockhand
