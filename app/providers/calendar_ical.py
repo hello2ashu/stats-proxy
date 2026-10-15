@@ -9,7 +9,7 @@ BYSETPOS), EXDATE, RECURRENCE-ID overrides and STATUS:CANCELLED.
 Env vars
   CALENDAR_URLS           required. One feed per line (or separated by ';'):
                               https://example.com/private/basic.ics
-                              Family=https://calendar.google.com/calendar/ical/.../basic.ics
+                              Family=https://calendar.google.com/calendar/ical/.../basic.ics   (or "Family: https://...")
                               Work=webcal://outlook.office365.com/owa/calendar/.../calendar.ics
                           "Name=" is optional (shown in the tooltip); webcal:// is treated as https://.
                           Private feed URLs contain secrets: they are never logged or returned.
@@ -91,17 +91,31 @@ DISPLAY_TZ_NAME = _display_name
 
 
 # ---- sources ---------------------------------------------------------------
+_SCHEME = r"(?:https?|webcals?)://"
+# entries are separated by newlines or ';', and also by a comma or whitespace when a new link follows
+_SPLIT = re.compile(r"[\r\n;]+|,(?=\s*(?:[^=,]+[=:]\s*)?[A-Za-z][A-Za-z0-9+.-]*://)|(?<![=,;:])\s+(?=" + _SCHEME + ")", re.I)
+_NAMED = re.compile(r"^(.+?)\s*[=:]\s*([A-Za-z][A-Za-z0-9+.-]*://.+)$")   # "Name=link" or "Name: link"
+_NAME_ONLY = re.compile(r"^[^=:/]+[=:]\s*$")                               # "Name:" - the link is missing
+_QUOTES = " \t\"'`<>"
+
+
 def parse_sources(raw=None):
+    text = RAW_URLS if raw is None else raw
     out = []
-    for part in re.split(r"[\n;]+", RAW_URLS if raw is None else raw):
-        part = part.strip()
-        if not part:
-            continue
-        m = re.match(r"^([^=:/]+?)\s*=\s*([A-Za-z]+://.+)$", part)
-        name, url = (m.group(1).strip(), m.group(2).strip()) if m else (None, part)
+    for n, part in enumerate((p for p in _SPLIT.split(text) if p and p.strip()), 1):
+        part = part.strip(_QUOTES)
+        part = re.sub(r"^CALENDAR(?:_ICAL)?_URLS\s*=\s*", "", part, flags=re.I).strip(_QUOTES)
+        m = _NAMED.match(part)
+        name, url = (m.group(1).strip(_QUOTES), m.group(2).strip(_QUOTES)) if m and "://" not in m.group(1) else (None, part)
         url = re.sub(r"^webcals?://", "https://", url, flags=re.I)
-        if not re.match(r"^https?://", url, re.I):
-            log.error("calendar: ignoring entry that is not an http(s)/webcal URL (entry #%d)", len(out) + 1)
+        if not re.match(r"^https?://\S+$", url, re.I):
+            if _NAME_ONLY.match(part):
+                log.error("calendar: entry #%d (%r) has a name but no link - is its compose variable empty or "
+                          "undefined?", n, part)
+                continue
+            # never log the entry itself: private feed URLs contain secrets
+            log.error("calendar: ignoring entry #%d (%d chars, starts with %r) - expected an http(s):// or "
+                      "webcal:// link, optionally written Name=link", n, len(part), part[:6])
             continue
         i = len(out)
         out.append({"name": name or "Calendar %d" % (i + 1), "url": url, "color": PALETTE[i % len(PALETTE)]})
@@ -543,7 +557,8 @@ def _load(src):
 
 def get_events():
     if not SOURCES:
-        raise RuntimeError("CALENDAR_URLS has no usable feed URLs")
+        raise RuntimeError("CALENDAR_URLS is set (%d chars) but none of its entries is a usable http(s)/webcal "
+                           "link - see the 'ignoring entry' lines in the log" % len(RAW_URLS))
     today = datetime.now(DISPLAY_TZ).date()
     d_from, d_to = today - timedelta(days=PAST_DAYS), today + timedelta(days=FUTURE_DAYS)
 
