@@ -35,7 +35,7 @@ services:
       GIT_DIAGRAMS_INCLUDE_PRIVATE: "1"        # your account has more private repos than the 9 public ones
       GIT_DIAGRAMS_KEY: ${git_diag}
       GIT_DIAGRAMS_CACHE_DIR: /data/git-diagrams   # optional, pair with a volume
-      GIT_DIAGRAMS_NO_AI=1
+    #  GIT_DIAGRAMS_NO_AI=1
     # Local, free, private: Ollama running on your NAS or another machine
     #  GIT_DIAGRAMS_LLM_URL: http://ollama:11434/v1
     #  GIT_DIAGRAMS_LLM_MODEL: qwen2.5-coder:7b      # example: pick one that fits your RAM
@@ -44,7 +44,7 @@ services:
       # Google Gemini free tier (no credit card; limits are shown in AI Studio and change)
       GIT_DIAGRAMS_LLM_URL: https://generativelanguage.googleapis.com/v1beta/openai
       GIT_DIAGRAMS_LLM_KEY: ${gemini_api_key}
-      GIT_DIAGRAMS_LLM_MODEL: <a current Flash model name from AI Studio>
+      GIT_DIAGRAMS_LLM_MODEL: gemini-3.1-flash-lite
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       CALENDAR_URLS: |
