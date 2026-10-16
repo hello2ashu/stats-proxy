@@ -379,6 +379,7 @@ def route(path, query):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        url = urlparse(self.path)          # must come first
         if "git_diagrams" in providers:
             handled = git_diagrams.handle(url.path, parse_qs(url.query))
             if handled:
