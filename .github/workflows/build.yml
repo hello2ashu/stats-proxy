@@ -20,7 +20,7 @@ env:
 jobs:
   build-and-deploy:
     # Must run on the Docker host so `docker inspect` sees the real container
-    runs-on: [self-hosted, linux]
+    runs-on: [ubuntu-latest, linux]
     timeout-minutes: 30
 
     steps:
