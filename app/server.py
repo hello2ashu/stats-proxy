@@ -268,7 +268,14 @@ if not os.environ.get("FESTIVALS_DISABLED"):
     log.info("festivals provider enabled -> locations=%s, fallback_api=%s",
               sorted(festivals.LOCATIONS), festivals.DRIKPANCHANG_API_URL or "not configured")
 
-
+if (os.environ.get("GIT_DIAGRAMS_USER") or os.environ.get("GITHUB_USER")) \
+        and not os.environ.get("GIT_DIAGRAMS_DISABLED"):
+    from providers import git_diagrams
+    providers["git_diagrams"] = True
+    log.info("git diagrams provider enabled -> %s", git_diagrams.describe())
+    for _w in git_diagrams.warnings():
+        log.warning("git diagrams: %s", _w)
+              
 def route(path, query):
     """Return (status, payload)."""
     if path == "/health":
@@ -372,7 +379,11 @@ def route(path, query):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        url = urlparse(self.path)
+        if "git_diagrams" in providers:
+            handled = git_diagrams.handle(url.path, parse_qs(url.query))
+            if handled:
+                status, body, ctype = handled
+                return self._send(status, body, ctype)
         try:
             status, payload = route(url.path, parse_qs(url.query))
         except NotImplementedError as exc:
