@@ -731,7 +731,14 @@ def _humanize(text):
 
 def _host_ok(host):
     host = host.lower()
-    return host not in HOST_SKIP_EXACT and not host.endswith(HOST_SKIP_SUFFIX) and not re.match(r"^[\d.]+$", host)
+    return (host not in HOST_SKIP_EXACT and not host.endswith(HOST_SKIP_SUFFIX) and "example" not in host
+            and not host.endswith((".local", ".lan", ".internal", ".test", ".invalid", ".localhost"))
+            and not re.match(r"^[\d.]+$", host))
+
+
+def _strip_comments(text):
+    """Drop comment-only lines so URLs in comments and doc blocks do not become 'external systems'."""
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith(("#", "//", "*", "/*")))
 
 
 class _G:
@@ -906,7 +913,7 @@ def build_static(repo):
         for t in sorted(tops[p] & set(DB_IMPORTS)):
             G.link(ids[p], G.comp(("db", DB_IMPORTS[t]), DB_IMPORTS[t], "datastore"), "reads and writes")
         if calls_http:
-            for host in set(URL_RE.findall(files[p])):
+            for host in set(URL_RE.findall(_strip_comments(files[p]))):
                 if _host_ok(host):
                     host_files.setdefault(host.lower(), []).append(p)
     for host, plist in sorted(host_files.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:6]:
@@ -1188,7 +1195,7 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
   if (window.GitDiagrams) return;
 
   var CSS = `
-.gd-root{--gd-h:720px;display:flex;gap:12px;height:var(--gd-h);width:100%;color:#e8eaed;font:14px/1.45 Manrope,system-ui,-apple-system,"Segoe UI",sans-serif;text-align:left;box-sizing:border-box}
+.gd-root{color-scheme:dark;--gd-h:720px;display:flex;gap:12px;height:var(--gd-h);width:100%;color:#e8eaed;font:14px/1.45 Manrope,system-ui,-apple-system,"Segoe UI",sans-serif;text-align:left;box-sizing:border-box}
 .gd-root *{box-sizing:border-box}
 .gd-side{width:264px;flex:0 0 264px;display:flex;flex-direction:column;min-height:0;background:#1c2028;border:1px solid #2a2f38;border-radius:12px}
 .gd-side-head{display:flex;align-items:baseline;justify-content:space-between;padding:12px 14px 4px}
@@ -1233,6 +1240,18 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
 .gd-row{margin:3px 0}
 .gd-file{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;background:#2a1f4a;color:#d8ccff;border-radius:5px;padding:1px 6px;margin-left:6px}
 .gd-lab{color:#9aa3af}
+.gd-menu-wrap{position:relative}
+.gd-menu{position:absolute;right:0;top:36px;z-index:20;width:330px;max-width:calc(100vw - 40px);background:#1c2028;border:1px solid #39414d;border-radius:12px;padding:12px 14px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.gd-menu[hidden]{display:none}
+.gd-mrow{display:flex;align-items:center;gap:10px;margin:0 0 10px}
+.gd-mrow:last-child{margin-bottom:0}
+.gd-mlab{width:68px;flex:0 0 68px;color:#9aa3af;font-size:12px}
+.gd-seg{display:flex;gap:4px;flex-wrap:wrap}
+.gd-seg button{font:inherit;font-size:12px;color:#c9d1db;background:#232832;border:1px solid #2a2f38;border-radius:7px;padding:4px 8px;cursor:pointer}
+.gd-seg button:hover{border-color:#3b82f6}
+.gd-seg button[aria-pressed=true]{background:#1d4ed8;border-color:#60a5fa;color:#fff}
+.gd-mrow label{display:flex;align-items:center;gap:8px;cursor:pointer;color:#c9d1db;font-size:13px}
+.gd-rot{position:relative;margin:0 auto}
 .gd-root.gd-full{position:fixed;inset:0;z-index:2147483000;height:100vh;padding:12px;background:#14171c}
 @media (max-width:820px){.gd-root{flex-direction:column;height:auto}.gd-side{width:auto;flex:none;max-height:260px}.gd-stage{height:70vh}}
 `;
@@ -1252,7 +1271,25 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
           '<span class="gd-zpct">100%</span>' +
           '<button type="button" class="gd-btn gd-zin" title="Zoom in" aria-label="Zoom in">+</button>' +
           '<button type="button" class="gd-btn gd-fit" title="Fit the diagram to the width">Fit</button>' +
-          '<button type="button" class="gd-btn gd-fs" title="Full screen (Esc to leave)">Full screen</button>' +
+          '<button type="button" class="gd-btn gd-rl" title="Rotate the picture 90\u00b0 to the left" aria-label="Rotate left">\u27f2</button>' +
+          '<button type="button" class="gd-btn gd-rr" title="Rotate the picture 90\u00b0 to the right" aria-label="Rotate right">\u27f3</button>' +
+          '<div class="gd-menu-wrap">' +
+            '<button type="button" class="gd-btn gd-view" aria-haspopup="true" title="Change direction, lines, spacing and what is shown">Layout &amp; view \u25be</button>' +
+            '<div class="gd-menu" hidden>' +
+              '<div class="gd-mrow"><span class="gd-mlab">Direction</span><div class="gd-seg" data-k="dir">' +
+                '<button type="button" data-v="auto" title="Pick automatically: wide diagrams run left to right">Auto</button>' +
+                '<button type="button" data-v="TD">\u2193 Down</button><button type="button" data-v="LR">\u2192 Right</button>' +
+                '<button type="button" data-v="BT">\u2191 Up</button><button type="button" data-v="RL">\u2190 Left</button></div></div>' +
+              '<div class="gd-mrow"><span class="gd-mlab">Lines</span><div class="gd-seg" data-k="curve">' +
+                '<button type="button" data-v="basis">Curved</button><button type="button" data-v="linear">Straight</button><button type="button" data-v="step">Stepped</button></div></div>' +
+              '<div class="gd-mrow"><span class="gd-mlab">Spacing</span><div class="gd-seg" data-k="space">' +
+                '<button type="button" data-v="compact">Compact</button><button type="button" data-v="normal">Normal</button><button type="button" data-v="roomy">Roomy</button></div></div>' +
+              '<div class="gd-mrow"><label><input type="checkbox" data-k="labels"> Connection labels</label></div>' +
+              '<div class="gd-mrow"><label><input type="checkbox" data-k="ext"> External systems</label></div>' +
+              '<div class="gd-mrow"><button type="button" class="gd-btn gd-vreset">Reset view</button></div>' +
+            '</div>' +
+          '</div>' +
+'<button type="button" class="gd-btn gd-fs" title="Full screen (Esc to leave)">Full screen</button>' +
           '<button type="button" class="gd-btn gd-copy" title="Copy the Mermaid source">Copy source</button>' +
           '<button type="button" class="gd-btn gd-open" title="Open on GitHub">GitHub</button>' +
           '<button type="button" class="gd-btn gd-regen" hidden title="Rebuild this diagram now (AI mode uses API credit)">Regenerate</button>' +
@@ -1298,6 +1335,39 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
   }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+  /*VIEWFN*/
+  var DEFAULT_VIEW = { dir: 'auto', curve: 'basis', space: 'normal', labels: true, ext: true, rot: 0 };
+
+  function autoDir(src) {
+    var m = /^flowchart\s+(TD|TB|LR|RL|BT)/m.exec(src);
+    var cur = m ? m[1] : 'TD';
+    if (cur !== 'TD' && cur !== 'TB') return cur;
+    return (src.match(/:::/g) || []).length > 10 ? 'LR' : 'TD';   // wide fan-outs read better turned 90 degrees
+  }
+
+  function dropExternals(src) {
+    var ids = {}, nodeRe = /^\s*(\w+)\s*[\[\(].*:::k_external\s*$/, edgeRe = /^\s*(\w+)\s+(?:-->|-\.->|==>)(?:\|[^|\n]*\|)?\s*(\w+)\s*$/;
+    var lines = src.split('\n');
+    lines.forEach(function (l) { var m = nodeRe.exec(l); if (m) ids[m[1]] = 1; });
+    return lines.filter(function (l) {
+      if (nodeRe.test(l)) return false;
+      var e = edgeRe.exec(l);
+      return !(e && (ids[e[1]] || ids[e[2]]));
+    }).join('\n');
+  }
+
+  function viewSource(src, V) {
+    var s = src;
+    if (!V.ext) s = dropExternals(s);
+    if (!V.labels) s = s.replace(/(-->|-\.->|==>)\|[^|\n]*\|/g, '$1');
+    var dir = V.dir === 'auto' ? autoDir(s) : V.dir;
+    s = s.replace(/^flowchart\s+(?:TD|TB|LR|RL|BT)/m, 'flowchart ' + dir);
+    var sp = { compact: [18, 34], normal: [32, 58], roomy: [56, 96] }[V.space] || [32, 58];
+    var curve = { basis: 'basis', linear: 'linear', step: 'step' }[V.curve] || 'basis';
+    return '%%{init: {"flowchart": {"curve": "' + curve + '", "nodeSpacing": ' + sp[0] + ', "rankSpacing": ' + sp[1] + '}}}%%\n' + s;
+  }
+  /*ENDVIEWFN*/
+
   function mount(host, opts) {
     if (host.__gd) return host.__gd;
     opts = opts || {};
@@ -1305,13 +1375,20 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     var base = (opts.base || '').replace(/\/+$/, '');
     var KEY = opts.key || '';
     var OV = '__overview__';
-    var S = { repos: [], user: '', ai: false, active: null, zoom: 1, base: 0, src: '', url: '', token: 0, rid: 0, seen: null, name: '' };
+    var S = { repos: [], user: '', ai: false, active: null, zoom: 1, base: 0, baseH: 0, src: '', url: '', token: 0, rid: 0, seen: null, name: '' };
 
     host.classList.add('gd-root');
     host.innerHTML = TEMPLATE;
     host.__gd = S;
     var q = function (sel) { return host.querySelector(sel); };
     var stage = q('.gd-stage');
+    var V = {};
+    (function () {
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem('gd_view') || 'null'); } catch (e) { saved = null; }
+      Object.keys(DEFAULT_VIEW).forEach(function (k) { V[k] = saved && saved[k] != null ? saved[k] : DEFAULT_VIEW[k]; });
+    })();
+    function saveView() { try { localStorage.setItem('gd_view', JSON.stringify(V)); } catch (e) { /* ignore */ } }
 
     function apiUrl(path, extra) {
       var p = new URLSearchParams(extra || {});
@@ -1424,13 +1501,17 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
 
     function draw(src) {
       return loadMermaid().then(function (m) {
-        return m.render('gd-svg-' + (++S.rid), src);
+        return m.render('gd-svg-' + (++S.rid), viewSource(src, V));
       }).then(function (out) {
         stage.innerHTML = out.svg;
         var svg = stage.querySelector('svg');
         var vb = svg.viewBox && svg.viewBox.baseVal;
-        S.base = vb && vb.width ? vb.width : svg.getBoundingClientRect().width;
+        var box = svg.getBoundingClientRect();
+        S.base = vb && vb.width ? vb.width : box.width;
+        S.baseH = vb && vb.height ? vb.height : box.height;
         svg.removeAttribute('height'); svg.removeAttribute('width'); svg.style.maxWidth = 'none';
+        var wrap = el('div', 'gd-rot');
+        stage.innerHTML = ''; wrap.appendChild(svg); stage.appendChild(wrap);
         fit();
       }).catch(function (e) {
         stage.innerHTML = '';
@@ -1478,9 +1559,17 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
 
     /* ---- zoom / pan ---- */
     function applyZoom() {
-      var svg = stage.querySelector('svg');
-      if (svg && S.base) svg.style.width = Math.round(S.base * S.zoom) + 'px';
+      var svg = stage.querySelector('svg'), wrap = stage.querySelector('.gd-rot');
       q('.gd-zpct').textContent = Math.round(S.zoom * 100) + '%';
+      if (!svg || !wrap || !S.base) return;
+      var w = Math.round(S.base * S.zoom), h = Math.round(S.baseH * S.zoom), r = ((V.rot % 360) + 360) % 360;
+      var turned = r === 90 || r === 270;
+      svg.style.cssText = 'position:absolute;left:0;top:0;margin:0;max-width:none;transform-origin:0 0;width:' + w + 'px;height:' + h + 'px;' +
+        (r === 90 ? 'transform:translate(' + h + 'px,0) rotate(90deg);' :
+         r === 180 ? 'transform:translate(' + w + 'px,' + h + 'px) rotate(180deg);' :
+         r === 270 ? 'transform:translate(0,' + w + 'px) rotate(-90deg);' : '');
+      wrap.style.width = (turned ? h : w) + 'px';
+      wrap.style.height = (turned ? w : h) + 'px';
     }
     function setZoom(z, ax, ay) {
       z = clamp(z, 0.1, 5);
@@ -1492,12 +1581,38 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     }
     function fit() {
       if (!stage.clientWidth) { S.needFit = true; return; }       // tab hidden: fit once it is visible
-      S.zoom = S.base ? clamp((stage.clientWidth - 32) / S.base, 0.15, 1.25) : 1;
+      var r = ((V.rot % 360) + 360) % 360, natural = (r === 90 || r === 270) ? S.baseH : S.base;
+      S.zoom = natural ? clamp((stage.clientWidth - 32) / natural, 0.15, 1.25) : 1;
       applyZoom(); stage.scrollLeft = 0; stage.scrollTop = 0;
     }
     q('.gd-zin').addEventListener('click', function () { setZoom(S.zoom * 1.25); });
     q('.gd-zout').addEventListener('click', function () { setZoom(S.zoom / 1.25); });
     q('.gd-fit').addEventListener('click', fit);
+    function redraw() { if (S.src) draw(S.src); }
+    function rotate(delta) { V.rot = (((V.rot + delta) % 360) + 360) % 360; saveView(); fit(); }
+    q('.gd-rl').addEventListener('click', function () { rotate(-90); });
+    q('.gd-rr').addEventListener('click', function () { rotate(90); });
+
+    var menu = q('.gd-menu');
+    function syncMenu() {
+      menu.querySelectorAll('.gd-seg').forEach(function (seg) {
+        var k = seg.getAttribute('data-k');
+        seg.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(V[k] === b.getAttribute('data-v'))); });
+      });
+      menu.querySelectorAll('input[type=checkbox]').forEach(function (c) { c.checked = !!V[c.getAttribute('data-k')]; });
+    }
+    q('.gd-view').addEventListener('click', function (e) { e.stopPropagation(); menu.hidden = !menu.hidden; syncMenu(); });
+    menu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var b = e.target.closest('.gd-seg button');
+      if (b) { V[b.parentNode.getAttribute('data-k')] = b.getAttribute('data-v'); saveView(); syncMenu(); redraw(); return; }
+      if (e.target.closest('.gd-vreset')) { Object.keys(DEFAULT_VIEW).forEach(function (k) { V[k] = DEFAULT_VIEW[k]; }); saveView(); syncMenu(); redraw(); }
+    });
+    menu.addEventListener('change', function (e) {
+      var k = e.target.getAttribute('data-k');
+      if (k === 'labels' || k === 'ext') { V[k] = e.target.checked; saveView(); redraw(); }
+    });
+    document.addEventListener('click', function () { menu.hidden = true; });
     stage.addEventListener('dblclick', fit);
     stage.addEventListener('wheel', function (e) {
       if (!(e.ctrlKey || e.metaKey)) return;                     // plain wheel keeps scrolling the page
@@ -1517,7 +1632,7 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
       size(); if (S.base) fit();
     }
     q('.gd-fs').addEventListener('click', function () { setFull(!host.classList.contains('gd-full')); });
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && host.classList.contains('gd-full')) setFull(false); });
+    document.addEventListener('keydown', function (e) { if (e.key !== 'Escape') return; if (!menu.hidden) { menu.hidden = true; return; } if (host.classList.contains('gd-full')) setFull(false); });
     q('.gd-copy').addEventListener('click', function () {
       var b = q('.gd-copy');
       (navigator.clipboard ? navigator.clipboard.writeText(S.src) : Promise.reject()).then(
