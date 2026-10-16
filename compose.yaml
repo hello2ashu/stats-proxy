@@ -30,9 +30,9 @@ services:
       # --- GitHub -> Homepage sync (existing, unchanged) ---
       GITHUB_USER: hello2ashu
       GITHUB_TOKEN: ${github_pat}
-      GIT_DIAGRAMS_TOKEN: ${github_pat}            # recommended: raises GitHub's limit from 60 to 5000 calls/hour
+      GIT_DIAGRAMS_TOKEN: ${github_pat}           # recommended: raises GitHub's limit from 60 to 5000 calls/hour
       GIT_DIAGRAMS_INCLUDE_PRIVATE: "1"        # your account has more private repos than the 9 public ones
-      GIT_DIAGRAMS_KEY: ${git_diag_key}
+      GIT_DIAGRAMS_KEY: ${github_pat}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       CALENDAR_URLS: |
