@@ -26,6 +26,7 @@ services:
     volumes:
       - /volume1/docker/homepage:/config
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./git-diagrams-cache:/data/git-diagrams
     environment:
       # --- GitHub -> Homepage sync (existing, unchanged) ---
       GITHUB_USER: hello2ashu
@@ -33,6 +34,17 @@ services:
       GIT_DIAGRAMS_TOKEN: ${github_pat}           # recommended: raises GitHub's limit from 60 to 5000 calls/hour
       GIT_DIAGRAMS_INCLUDE_PRIVATE: "1"        # your account has more private repos than the 9 public ones
       GIT_DIAGRAMS_KEY: ${git_diag}
+      GIT_DIAGRAMS_CACHE_DIR: /data/git-diagrams   # optional, pair with a volume
+      GIT_DIAGRAMS_NO_AI=1
+    # Local, free, private: Ollama running on your NAS or another machine
+    #  GIT_DIAGRAMS_LLM_URL: http://ollama:11434/v1
+    #  GIT_DIAGRAMS_LLM_MODEL: qwen2.5-coder:7b      # example: pick one that fits your RAM
+    #  GIT_DIAGRAMS_MAX_PROMPT_CHARS: "12000"        # keep within the model's context window
+
+      # Google Gemini free tier (no credit card; limits are shown in AI Studio and change)
+      GIT_DIAGRAMS_LLM_URL: https://generativelanguage.googleapis.com/v1beta/openai
+      GIT_DIAGRAMS_LLM_KEY: ${gemini_api_key}
+      GIT_DIAGRAMS_LLM_MODEL: <a current Flash model name from AI Studio>
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       CALENDAR_URLS: |

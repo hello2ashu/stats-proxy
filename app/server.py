@@ -384,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
             handled = git_diagrams.handle(url.path, parse_qs(url.query))
             if handled:
                 status, body, ctype = handled
-                return self._send(status, body, ctype)
+                return self._send(status, body, ctype, cors=True)
         try:
             status, payload = route(url.path, parse_qs(url.query))
         except NotImplementedError as exc:
