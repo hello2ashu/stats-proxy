@@ -26,7 +26,7 @@ services:
     volumes:
       - /volume1/docker/homepage:/config
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./git-diagrams-cache:/data/git-diagrams
+      - /volume1/docker/homepage/git-diagrams-cache:/data/git-diagrams
     environment:
       # --- GitHub -> Homepage sync (existing, unchanged) ---
       GITHUB_USER: hello2ashu
