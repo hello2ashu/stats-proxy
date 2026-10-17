@@ -31,13 +31,17 @@ Routes
                            makes live requests - see providers/holidays.py). Optional query:
                            ?location=seattle (default: the first of festivals.LOCATIONS, usually
                            new_delhi - paksha/tithi are most meaningful for the Indian location)
-  GET /calendar/events     Merged, de-duplicated appointments from several iCal feeds (CALENDAR_URLS)                     
+  GET /calendar/events     Merged, de-duplicated appointments from several iCal feeds (CALENDAR_URLS)
+  GET /git-diagrams*       Architecture diagrams for every GitHub repo (see providers/git_diagrams.py)
+  GET  /llm/v1/models              OpenAI-compatible model list (Gemini + OpenRouter free models)
+  POST /llm/v1/chat/completions    OpenAI-compatible chat endpoint for other apps; needs
+                                   "Authorization: Bearer <LLM_GATEWAY_KEY>" (see providers/llm_gateway.py)
 
 Each provider is enabled only if its env var is set (BOOKORBIT_URL, PAPERLESS_URL, GITHUB_USER,
 DOCKHAND_URL+DOCKHAND_TOKEN, SYNOLOGY_URL, TRILIUM_URL, LINKWARDEN_URL, KARAKEEP_URL,
-DAWARICH_URL, AIRTRAIL_URL, TREK_URL, PLEX_URL). The festivals provider has no required env var
-and is on by default - set FESTIVALS_DISABLED to turn it off. Upstream calls are cached
-(CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
+DAWARICH_URL, AIRTRAIL_URL, TREK_URL, PLEX_URL, LLM_GATEWAY_KEY). The festivals provider has no
+required env var and is on by default - set FESTIVALS_DISABLED to turn it off. Upstream calls are
+cached (CACHE_TTL_SECS, default 60) and stale data is served if an upstream is briefly down.
 
 Logging (LOG_LEVEL, default INFO) - one line per upstream refresh:
   bookorbit OK in 0.31s (tracked=10 ...)              successful refresh
@@ -249,7 +253,7 @@ if os.environ.get("PLEX_URL"):
                       lambda d: f"movies={d.get('movies')} tv={d.get('tvShows')}")
     caches.append(_plex)
     log.info("plex provider enabled -> %s", plex.BASE)
-    
+
 if os.environ.get("CALENDAR_URLS"):
     from providers import calendar_ical
     providers["calendar"] = True
@@ -261,7 +265,7 @@ if os.environ.get("CALENDAR_URLS"):
     )
     caches.append(_calendar)
     log.info("calendar provider enabled -> %s", calendar_ical.describe())
-    
+
 if not os.environ.get("FESTIVALS_DISABLED"):
     from providers import festivals, holidays
     providers["festivals"] = True
@@ -275,7 +279,14 @@ if (os.environ.get("GIT_DIAGRAMS_USER") or os.environ.get("GITHUB_USER")) \
     log.info("git diagrams provider enabled -> %s", git_diagrams.describe())
     for _w in git_diagrams.warnings():
         log.warning("git diagrams: %s", _w)
-              
+
+# OpenAI-compatible gateway for other apps; stays OFF unless LLM_GATEWAY_KEY is set
+if os.environ.get("LLM_GATEWAY_KEY") and not os.environ.get("LLM_GATEWAY_DISABLED"):
+    from providers import llm_gateway
+    providers["llm_gateway"] = True
+    log.info("llm gateway enabled -> %s (models: Gemini + OpenRouter free, key required)", llm_gateway.PREFIX)
+
+
 def route(path, query):
     """Return (status, payload)."""
     if path == "/health":
@@ -355,11 +366,11 @@ def route(path, query):
         if "plex" not in providers:
             return 404, {"error": "plex provider disabled"}
         return 200, _plex.get()
-        
+
     if path == "/calendar/events":
         if "calendar" not in providers:
             return 404, {"error": "calendar provider disabled (CALENDAR_URLS not set)"}
-        return 200, _calendar.get()    
+        return 200, _calendar.get()
 
     if path == "/festivals":
         if "festivals" not in providers:
@@ -378,15 +389,24 @@ def route(path, query):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _is_llm(self, path):
+        return "llm_gateway" in providers and (path == llm_gateway.PREFIX or path.startswith(llm_gateway.PREFIX + "/"))
+
     def do_GET(self):
         url = urlparse(self.path)          # must come first
+        query = parse_qs(url.query)
+        if self._is_llm(url.path):
+            handled = llm_gateway.handle("GET", url.path, query, self.headers)
+            if handled:
+                status, body, ctype = handled
+                return self._send(status, body, ctype, cors=True)
         if "git_diagrams" in providers:
-            handled = git_diagrams.handle(url.path, parse_qs(url.query))
+            handled = git_diagrams.handle(url.path, query)
             if handled:
                 status, body, ctype = handled
                 return self._send(status, body, ctype, cors=True)
         try:
-            status, payload = route(url.path, parse_qs(url.query))
+            status, payload = route(url.path, query)
         except NotImplementedError as exc:
             status, payload = 501, {"error": str(exc)}
         except ValueError:
@@ -399,7 +419,16 @@ class Handler(BaseHTTPRequestHandler):
                    cors=url.path.startswith(("/festivals", "/calendar")))
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        url = urlparse(self.path)
+        path = url.path
+        if self._is_llm(path):
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > llm_gateway.MAX_BODY:
+                return self._send(413, b'{"error": {"message": "payload too large"}}', "application/json", cors=True)
+            handled = llm_gateway.handle("POST", path, parse_qs(url.query), self.headers, self.rfile.read(length))
+            if handled:
+                status, body, ctype = handled
+                return self._send(status, body, ctype, cors=True)
         if path not in ("/webhook", "/github/webhook") or "github" not in providers:
             return self._send(404, b'{"error": "not found"}', "application/json")
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -407,6 +436,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, b"payload too large", "text/plain")
         status, text = github_sync.handle_webhook(self.headers, self.rfile.read(length))
         self._send(status, text.encode(), "text/plain")
+
+    def do_OPTIONS(self):
+        """CORS preflight, so browser-based apps can call the LLM gateway with an Authorization header."""
+        path = urlparse(self.path).path
+        if not self._is_llm(path) or CORS_ALLOW_ORIGIN == "-":
+            return self._send(404, b'{"error": "not found"}', "application/json")
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Api-Key")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send(self, status, body, content_type, cors=False):
         self.send_response(status)
