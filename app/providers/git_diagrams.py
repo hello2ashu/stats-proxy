@@ -47,6 +47,8 @@ from urllib.parse import quote, unquote
 
 import requests
 
+from . import gemini_models
+
 log = logging.getLogger("stats-proxy.git_diagrams")
 
 USER = os.environ.get("GIT_DIAGRAMS_USER") or os.environ.get("GITHUB_USER", "")
@@ -63,8 +65,10 @@ LLM_URL = os.environ.get("GIT_DIAGRAMS_LLM_URL", "").rstrip("/")
 LLM_KEY = os.environ.get("GIT_DIAGRAMS_LLM_KEY", "")
 LLM_MODEL = os.environ.get("GIT_DIAGRAMS_LLM_MODEL", "")
 CACHE_DIR = os.environ.get("GIT_DIAGRAMS_CACHE_DIR", "/tmp/git-diagrams-cache")
-LLM_KIND = "openai" if (LLM_URL and LLM_MODEL) else ("anthropic" if ANTHROPIC_KEY else "")
-AI_ENABLED = bool(LLM_KIND) and not os.environ.get("GIT_DIAGRAMS_NO_AI")
+LLM_AUTO = LLM_MODEL.lower() == "auto"          # use the newest working Gemini model (see gemini_models)
+LLM_MAX_TOKENS = int(os.environ.get("GIT_DIAGRAMS_LLM_MAX_TOKENS", "12000"))
+LLM_KIND = "openai" if (LLM_URL and LLM_MODEL and not LLM_AUTO) else ("anthropic" if ANTHROPIC_KEY else "")
+AI_ENABLED = (bool(LLM_KIND) or (LLM_AUTO and gemini_models.enabled())) and not os.environ.get("GIT_DIAGRAMS_NO_AI")
 TIMEOUT = 15
 SCHEMA = 3              # bump to invalidate cached AI diagrams
 AI_ERROR_COOLDOWN = 300  # after a failed AI build, serve the basic diagram for this long
@@ -93,7 +97,7 @@ def warnings():
                    "listing public repos only (private repos are never served without a key)")
     if not TOKEN:
         out.append("no GitHub token: only 60 API calls/hour are allowed; set GIT_DIAGRAMS_TOKEN")
-    if (LLM_URL and not LLM_MODEL) or (LLM_MODEL and not LLM_URL):
+    if (LLM_URL and not LLM_MODEL) or (LLM_MODEL and not LLM_AUTO and not LLM_URL):
         out.append("GIT_DIAGRAMS_LLM_URL and GIT_DIAGRAMS_LLM_MODEL must both be set - AI mode is off")
     return out
 
@@ -101,7 +105,8 @@ def warnings():
 def describe():
     return "user=%s, private=%s, key=%s, github_token=%s, ai=%s" % (
         USER, "yes" if PRIVATE_OK else "no", "required" if KEY else "none",
-        "yes" if TOKEN else "no", (LLM_MODEL if LLM_KIND == "openai" else MODEL) if AI_ENABLED else "off (built-in static analysis)")
+        "yes" if TOKEN else "no", (_default_model() or "auto (waiting for the Gemini model list)") if AI_ENABLED else
+        "off (built-in static analysis)" + (", Gemini picker on" if gemini_models.enabled() else ""))
 
 
 # ---- tiny thread-safe cache that serves stale data if GitHub is unreachable ------------------
@@ -429,7 +434,8 @@ summary: 2-4 plain sentences starting with "This repository". Say what it is and
 
 components: 8-35 objects {"id": "short_snake_case", "name": "Human name, max 5 words", "group": "Group title or empty string", "kind": "client|service|provider|external|datastore|sync|job|config|other", "file": "path from the file tree, or empty string"}
 - kind: client = a UI/consumer of this system; service = the main process or API; provider = one module in a family of similar integrations; external = a third-party system or other app this code talks to; datastore = database/cache/queue; sync = synchronisation or deployment logic; job = scheduled or background work; config = configuration the code reads or writes.
-- Put related components in a group (for example "Stats providers" or "Repository sync"). A group needs at least 2 members; otherwise use an empty group.
+- Put related components in a group (for example "HTTP service", "Stats providers", "Repository sync"). A group may hold a single component when it names a distinct layer of the system.
+- Include whatever consumes this system (a dashboard, browser or other app) as a component of kind client, and show the response flow back to it when it matters.
 - Always include the external systems the code talks to (APIs, databases, other apps) as separate components with an empty file.
 - "file" must be a path that appears in the file tree. Never invent a path.
 
@@ -476,14 +482,15 @@ def _limit_for(path):
     return 5000
 
 
-def build_prompt(repo, paths, texts):
+def build_prompt(repo, paths, texts, budget=None):
+    budget = budget or MAX_PROMPT_CHARS
     tree = "\n".join(paths[:400]) + ("\n... %d more files" % (len(paths) - 400) if len(paths) > 400 else "")
     parts = ["Repository: %s\nDescription: %s\nPrimary language: %s\n\n<file_tree>\n%s\n</file_tree>\n"
              % (repo["full_name"], repo["description"] or "none", repo["language"] or "unknown", tree)]
     used = len(parts[0])
     for path, text in texts.items():
-        chunk = _redact(text[:min(_limit_for(path), MAX_PROMPT_CHARS // 4)])
-        if used + len(chunk) > MAX_PROMPT_CHARS:
+        chunk = _redact(text[:min(_limit_for(path), budget // 4)])
+        if used + len(chunk) > budget:
             break
         used += len(chunk)
         parts.append('<file path="%s">\n%s\n</file>\n' % (path, chunk))
@@ -491,10 +498,18 @@ def build_prompt(repo, paths, texts):
     return "".join(parts)
 
 
-def _call_llm(system, user):
+def _call_llm(system, user, model=None):
+    """Send the prompt to whichever backend serves `model` (Gemini list, a fixed OpenAI-style
+    endpoint, or Anthropic) and return the raw text answer."""
+    model = model or _default_model()
+    if model and gemini_models.has(model):
+        base, key = gemini_models.connection()
+        return _call_openai_compat(system, user, base, key, model, gemini=True)
     if LLM_KIND == "openai":
-        return _call_openai_compat(system, user)
-    return _call_anthropic(system, user)
+        return _call_openai_compat(system, user, LLM_URL, LLM_KEY, LLM_MODEL)
+    if LLM_KIND == "anthropic":
+        return _call_anthropic(system, user)
+    raise RuntimeError("no AI backend is configured for model %r" % model)
 
 
 def _call_anthropic(system, user):
@@ -513,16 +528,19 @@ def _call_anthropic(system, user):
     return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
 
 
-def _call_openai_compat(system, user):
-    """OpenAI-style /chat/completions: works with Ollama, Gemini, Groq, OpenRouter, LM Studio, ..."""
+def _call_openai_compat(system, user, url, key, model, gemini=False):
+    """OpenAI-style /chat/completions: works with Gemini, Ollama, Groq, OpenRouter, LM Studio, ..."""
     headers = {"content-type": "application/json"}
-    if LLM_KEY:
-        headers["Authorization"] = "Bearer " + LLM_KEY
-    r = requests.post(
-        LLM_URL + "/chat/completions", headers=headers, timeout=300,
-        json={"model": LLM_MODEL, "temperature": 0.1, "max_tokens": 6000,
-              "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]},
-    )
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    body = {"model": model, "temperature": 0.1, "max_tokens": LLM_MAX_TOKENS,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+    if gemini:
+        body["response_format"] = {"type": "json_object"}
+    r = requests.post(url + "/chat/completions", headers=headers, json=body, timeout=300)
+    if r.status_code == 400 and "response_format" in body:      # a model that refuses JSON mode: ask again plainly
+        body.pop("response_format")
+        r = requests.post(url + "/chat/completions", headers=headers, json=body, timeout=300)
     if r.status_code != 200:
         raise RuntimeError("LLM endpoint HTTP %d: %s" % (r.status_code, r.text[:200]))
     choice = (r.json().get("choices") or [{}])[0]
@@ -567,12 +585,6 @@ def normalize_ai(obj, valid_paths):
                       "kind": kind if kind in KINDS else "other", "file": path if path in valid_paths else ""})
     if len(comps) < 2:
         raise ValueError("the model returned too few components")
-    counts = {}
-    for c in comps:
-        counts[c["group"]] = counts.get(c["group"], 0) + 1
-    for c in comps:
-        if c["group"] and counts[c["group"]] < 2:
-            c["group"] = ""
     conns = []
     for e in (obj.get("connections") or [])[:MAX_CONNECTIONS]:
         if not isinstance(e, dict):
@@ -603,10 +615,12 @@ def mermaid_from_ai(data):
 
     def node(c):
         label = esc(c["name"], 40)
-        f = c.get("note") or c["file"]
-        if f and f != c["name"]:
-            label += "<br/>" + esc(f if len(f) <= 34 else "..." + f[-31:], 40)
-        shape = '[("%s")]' if c["kind"] == "datastore" else '["%s"]'
+        sub = c.get("note") or c["file"]
+        if sub:
+            sub = sub if c.get("note") else sub.rsplit("/", 1)[-1]      # file name only, like GitDiagram
+            if sub != c["name"]:
+                label += "<br/>[" + esc(sub, 34) + "]"
+        shape = {"datastore": '[("%s")]', "client": '(("%s"))'}.get(c["kind"], '["%s"]')
         return "%s%s:::k_%s" % (nid[c["id"]], shape % label, c["kind"])
 
     groups = OrderedDict()
@@ -624,8 +638,46 @@ def mermaid_from_ai(data):
     return "\n".join(lines + ["  " + d for d in AI_CLASSDEFS])
 
 
-def _model_label():
-    return LLM_MODEL if LLM_KIND == "openai" else MODEL
+def _default_model():
+    """The model used when the viewer does not pick one (None = built-in analysis)."""
+    if os.environ.get("GIT_DIAGRAMS_NO_AI"):
+        return None
+    if LLM_AUTO:
+        return gemini_models.recommended() if gemini_models.enabled() else None
+    if LLM_KIND == "openai":
+        return LLM_MODEL
+    if LLM_KIND == "anthropic":
+        return MODEL
+    return None
+
+
+def _allowed_models():
+    out = set(gemini_models.ids()) if gemini_models.enabled() else set()
+    default = _default_model()
+    if default:
+        out.add(default)
+    return out
+
+
+def _resolve_mode(requested):
+    """-> ('static', None) or ('ai:<model>', '<model>'). Only models we know about are accepted, so
+    nobody can make the proxy spend your quota on an arbitrary model name."""
+    requested = (requested or "").strip()
+    if requested == "static":
+        return "static", None
+    if requested:
+        if requested not in _allowed_models():
+            raise ValueError("model %r is not in the available list" % requested)
+        return "ai:" + requested, requested
+    default = _default_model()
+    return ("ai:" + default, default) if default else ("static", None)
+
+
+def _budget_for(model):
+    """Characters of repository text to send. Gemini and Claude have large context windows."""
+    if (model and gemini_models.has(model)) or (LLM_KIND == "anthropic" and model == MODEL):
+        return max(MAX_PROMPT_CHARS, 90000)
+    return MAX_PROMPT_CHARS
 
 
 MAX_ARCHIVE_BYTES = 30 * 1024 * 1024
@@ -688,6 +740,7 @@ def _assemble(repo, data, kind, model, facts):
     names = {c["id"]: c["name"] for c in data["components"]}
     return {
         "name": repo["name"], "kind": kind, "ai": kind == "ai", "model": model, "html_url": repo["html_url"],
+        "blob_base": "%s/blob/%s/" % (repo["html_url"], quote(repo["default_branch"], safe="")),
         "mermaid": mermaid_from_ai(data), "summary": data["summary"],
         "components": [{k: c.get(k, "") for k in ("name", "group", "kind", "file", "note")} for c in data["components"]],
         "connections": [{"from": names[e["from"]], "to": names[e["to"]], "label": e["label"], "file": e.get("file", "")}
@@ -892,7 +945,7 @@ def build_static(repo):
     for p in chosen:
         for dep in sorted(imports[p]):
             if dep in ids:
-                G.link(ids[p], ids[dep], "imports")
+                G.link(ids[p], ids[dep], "imports", p)
 
     # --- external systems: *_URL style env vars, HTTP hosts, databases -------------------------
     ext_count, host_files = 0, {}
@@ -904,14 +957,14 @@ def build_static(repo):
             if base in covered:
                 continue
             if base in DATASTORE_ENV_BASES:
-                G.link(ids[p], G.comp(("db", base), _humanize(base), "datastore"), "reads and writes")
+                G.link(ids[p], G.comp(("db", base), _humanize(base), "datastore"), "reads and writes", p)
             elif ext_count < STATIC_MAX_EXTERNALS or ("ext", base) in G.comps:
                 if ("ext", base) not in G.comps:
                     ext_count += 1
                 G.link(ids[p], G.comp(("ext", base), _humanize(base) + " service", "external"),
-                       "requests data" if calls_http else "uses")
+                       "requests data" if calls_http else "uses", p)
         for t in sorted(tops[p] & set(DB_IMPORTS)):
-            G.link(ids[p], G.comp(("db", DB_IMPORTS[t]), DB_IMPORTS[t], "datastore"), "reads and writes")
+            G.link(ids[p], G.comp(("db", DB_IMPORTS[t]), DB_IMPORTS[t], "datastore"), "reads and writes", p)
         if calls_http:
             for host in set(URL_RE.findall(_strip_comments(files[p]))):
                 if _host_ok(host):
@@ -919,7 +972,7 @@ def build_static(repo):
     for host, plist in sorted(host_files.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:6]:
         hid = G.comp(("host", host), host, "external")
         for p in plist[:2]:
-            G.link(ids[p], hid, "requests data")
+            G.link(ids[p], hid, "requests data", p)
 
     # --- docker compose: services, dependencies, env wiring, published ports -------------------
     composes = sorted((p for p in paths if p.rsplit("/", 1)[-1] in COMPOSE_NAMES and p.count("/") <= 1 and p in files),
@@ -930,9 +983,9 @@ def build_static(repo):
     if dockerfile:
         df_id = G.comp(("dockerfile",), "Dockerfile", "config", "", dockerfile)
         for base in dockerfile_bases(files[dockerfile]):
-            G.link(df_id, G.comp(("base", base), base, "external", note="base image"), "built from")
+            G.link(df_id, G.comp(("base", base), base, "external", note="base image"), "built from", dockerfile)
         if entry and entry.rsplit("/", 1)[-1] in files[dockerfile]:
-            G.link(df_id, ids[entry], "runs")
+            G.link(df_id, ids[entry], "runs", dockerfile)
     for path in composes:
         services = parse_compose(files[path])
         if not services:
@@ -948,18 +1001,18 @@ def build_static(repo):
         for sname, s in services.items():
             for d in s["depends"]:
                 if d in sid:
-                    G.link(sid[sname], sid[d], "needs")
+                    G.link(sid[sname], sid[d], "needs", path)
             for k, v in s["env"]:
                 m = re.search(r"(?://|^)([A-Za-z0-9_.-]+)(?::\d+)?(?:/|$)", v)
                 if m and m.group(1) in sid and m.group(1) != sname:
-                    G.link(sid[sname], sid[m.group(1)], ("via " + k)[:40])
+                    G.link(sid[sname], sid[m.group(1)], ("via " + k)[:40], path)
             if s["build"] and df_id:
-                G.link(df_id, sid[sname], "builds image")
+                G.link(df_id, sid[sname], "builds image", dockerfile)
             for spec in s["ports"][:1]:
                 hp = _host_port(spec)
                 if hp.isdigit() and port_edges < 8:
                     client_id = client_id or G.comp(("client",), "Browser / reverse proxy", "client")
-                    G.link(client_id, sid[sname], "port " + hp)
+                    G.link(client_id, sid[sname], "port " + hp, path)
                     port_edges += 1
 
     # --- CI --------------------------------------------------------------------------------
@@ -968,13 +1021,13 @@ def build_static(repo):
     if flows:
         ci = G.comp(("ci",), "GitHub Actions", "job", "", flows[0])
         if df_id and re.search(r"build-push-action|docker\s+build", ci_text):
-            G.link(ci, df_id, "builds image")
+            G.link(ci, df_id, "builds image", flows[0])
         if "ghcr.io" in ci_text:
-            G.link(ci, G.comp(("ghcr",), "GitHub Container Registry", "external"), "pushes image")
+            G.link(ci, G.comp(("ghcr",), "GitHub Container Registry", "external"), "pushes image", flows[0])
         elif "docker.io" in ci_text or "dockerhub" in ci_text.lower():
-            G.link(ci, G.comp(("dockerhub",), "Docker Hub", "external"), "pushes image")
+            G.link(ci, G.comp(("dockerhub",), "Docker Hub", "external"), "pushes image", flows[0])
         if entry and re.search(r"pytest|npm (?:run )?test|go test|cargo test", ci_text):
-            G.link(ci, ids[entry], "tests")
+            G.link(ci, ids[entry], "tests", flows[0])
 
     if len(G.comps) < 3 or len(G.conns) < 2:
         return None
@@ -1015,49 +1068,49 @@ def build_static(repo):
 
 
 # ---- AI build (optional) ---------------------------------------------------------------------
-def build_ai(repo):
+def build_ai(repo, model):
     sizes, files = _fetch_archive(repo)
     if not sizes:
         raise EmptyRepo()
     paths = sorted(sizes)
     picked = [p for p in pick_files([(p, sizes[p]) for p in paths]) if p in files]
     texts = OrderedDict((p, files[p]) for p in picked)
-    data = normalize_ai(_parse_json(_call_llm(SYSTEM_PROMPT, build_prompt(repo, paths, texts))), set(paths))
-    return _assemble(repo, data, "ai", _model_label(), {"files_read": len(texts), "files_total": len(paths)})
+    prompt = build_prompt(repo, paths, texts, _budget_for(model))
+    data = normalize_ai(_parse_json(_call_llm(SYSTEM_PROMPT, prompt, model)), set(paths))
+    return _assemble(repo, data, "ai", model, {"files_read": len(texts), "files_total": len(paths)})
 
 
-# ---- result cache: memory + disk, keyed by the repo's last push and the analysis mode ---------
-MODE = ("ai:" + _model_label()) if AI_ENABLED else "static"
+# ---- result cache: memory + disk, per repo AND analysis mode, keyed by the repo's last push ----
+def _cache_path(name, mode):
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", name + "__" + mode)
+    return os.path.join(CACHE_DIR, slug + ".json")
 
 
-def _cache_path(name):
-    return os.path.join(CACHE_DIR, re.sub(r"[^A-Za-z0-9._-]", "_", name) + ".json")
-
-
-def _ai_load(repo):
-    name = repo["name"]
-    entry = _ai_mem.get(name)
+def _ai_load(repo, mode):
+    key = (repo["name"], mode)
+    entry = _ai_mem.get(key)
     if entry is None:
         try:
-            with open(_cache_path(name), encoding="utf-8") as fh:
+            with open(_cache_path(*key), encoding="utf-8") as fh:
                 entry = json.load(fh)
         except (OSError, ValueError):
             return None
-        _ai_mem[name] = entry
-    if entry.get("schema") == SCHEMA and entry.get("mode") == MODE and entry.get("pushed_at") == repo["pushed_at"]:
+        _ai_mem[key] = entry
+    if entry.get("schema") == SCHEMA and entry.get("mode") == mode and entry.get("pushed_at") == repo["pushed_at"]:
         return entry["result"]
     return None
 
 
-def _ai_save(repo, result):
-    entry = {"schema": SCHEMA, "mode": MODE, "pushed_at": repo["pushed_at"], "result": result}
-    _ai_mem[repo["name"]] = entry
+def _ai_save(repo, mode, result):
+    entry = {"schema": SCHEMA, "mode": mode, "pushed_at": repo["pushed_at"], "result": result}
+    key = (repo["name"], mode)
+    _ai_mem[key] = entry
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        tmp = _cache_path(repo["name"]) + ".tmp"
+        tmp = _cache_path(*key) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(entry, fh)
-        os.replace(tmp, _cache_path(repo["name"]))
+        os.replace(tmp, _cache_path(*key))
     except OSError as exc:
         log.warning("could not write diagram cache %s: %s", CACHE_DIR, exc)
 
@@ -1087,47 +1140,50 @@ def _static_or_tree(repo):
         return _heuristic(repo), False, msg
 
 
-def _run_job(repo):
-    name = repo["name"]
+def _run_job(repo, mode, model):
+    name, jkey = repo["name"], (repo["name"], mode)
     try:
         with _ai_sem:
             started = time.time()
             try:
-                result = build_ai(repo)
+                result = build_ai(repo, model)
             except EmptyRepo:
                 result = _heuristic(repo, True)
-        _ai_save(repo, result)
-        log.info("git_diagrams %s: AI diagram built in %.1fs", name, time.time() - started)
+        _ai_save(repo, mode, result)
+        log.info("git_diagrams %s: AI diagram (%s) built in %.1fs", name, model, time.time() - started)
         with _jobs_lock:
-            _jobs.pop(name, None)
+            _jobs.pop(jkey, None)
     except Exception as exc:
         msg = "%s: %s" % (type(exc).__name__, str(exc)[:240])
-        log.warning("git_diagrams %s: AI build failed - %s", name, msg)
+        log.warning("git_diagrams %s: AI build with %s failed - %s", name, model, msg)
         with _jobs_lock:
-            _jobs[name] = {"state": "error", "at": time.time(), "error": msg}
+            _jobs[jkey] = {"state": "error", "at": time.time(), "error": msg}
 
 
-def repo_diagram(repo, regen=False, refresh=False):
-    """Return (http_status, dict). Static mode answers directly; AI mode builds in the background (202)."""
-    cached = _ai_load(repo)
+def repo_diagram(repo, regen=False, refresh=False, model=None):
+    """Return (http_status, dict). Built-in analysis answers directly; an AI model builds in the
+    background (202 until ready). Raises ValueError for a model that is not on the allowed list."""
+    mode, mdl = _resolve_mode(model)
+    cached = _ai_load(repo, mode)
     if cached and not regen:
         return 200, cached
-    if not AI_ENABLED:
+    if mdl is None:
         result, cacheable, err = _static_or_tree(repo)
         if cacheable:
-            _ai_save(repo, result)
+            _ai_save(repo, mode, result)
         elif err:
             result = dict(result, ai_error=err)
         return 200, result
+    jkey = (repo["name"], mode)
     with _jobs_lock:
-        job = _jobs.get(repo["name"])
+        job = _jobs.get(jkey)
         if job and job["state"] == "running":
             return 202, {"status": "building", "since": job["at"]}
         if job and job["state"] == "error" and not regen and time.time() - job["at"] < AI_ERROR_COOLDOWN:
             fallback = _diagram_cache.get(repo["name"] + "|fallback", lambda: _static_or_tree(repo)[0])
             return 200, dict(fallback, ai_error=job["error"])
-        _jobs[repo["name"]] = {"state": "running", "at": time.time()}
-    threading.Thread(target=_run_job, args=(repo,), daemon=True, name="gd-" + repo["name"]).start()
+        _jobs[jkey] = {"state": "running", "at": time.time()}
+    threading.Thread(target=_run_job, args=(repo, mode, mdl), daemon=True, name="gd-" + repo["name"]).start()
     return 202, {"status": "building", "since": time.time()}
 
 
@@ -1152,7 +1208,12 @@ def handle(path, query):
         if path == "/git-diagrams/viewer.js":
             return 200, VIEWER_JS.encode(), "application/javascript; charset=utf-8"
         if path == "/git-diagrams/repos":
-            return _json(200, {"user": USER, "ai": AI_ENABLED, **get_repos(refresh)})
+            return _json(200, {"user": USER, "ai": AI_ENABLED, "gemini": gemini_models.enabled(), **get_repos(refresh)})
+        if path == "/git-diagrams/models":
+            info = gemini_models.get(refresh)
+            default = _default_model()
+            return _json(200, dict(info, default=default, ai_default=AI_ENABLED,
+                                   ai_available=bool(LLM_KIND) or info["enabled"]))
         if path == "/git-diagrams/overview":
             repos = get_repos(refresh)["repos"]
             return _json(200, {"name": "All repositories", "ai": False, "mermaid": build_overview(repos),
@@ -1162,8 +1223,10 @@ def handle(path, query):
             repo = _find_repo(name, refresh)
             if not repo:
                 return _json(404, {"error": "unknown repository %r" % name})
-            status, payload = repo_diagram(repo, regen=regen, refresh=refresh)
+            status, payload = repo_diagram(repo, regen=regen, refresh=refresh, model=query.get("model", [""])[0])
             return _json(status, payload)
+    except ValueError as exc:
+        return _json(400, {"error": str(exc)})
     except Exception as exc:
         return _json(502, {"error": "%s: %s" % (type(exc).__name__, str(exc)[:300])})
     return _json(404, {"error": "not found"})
@@ -1252,6 +1315,13 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
 .gd-seg button[aria-pressed=true]{background:#1d4ed8;border-color:#60a5fa;color:#fff}
 .gd-mrow label{display:flex;align-items:center;gap:8px;cursor:pointer;color:#c9d1db;font-size:13px}
 .gd-rot{position:relative;margin:0 auto}
+.gd-stage.gd-light{background:#f0e6ff}
+.gd-stage.gd-light .gd-note{color:#475569}
+.gd-stage g.node[style*="pointer"]:hover rect,.gd-stage g.node[style*="pointer"]:hover circle,.gd-stage g.node[style*="pointer"]:hover path{filter:brightness(.94)}
+.gd-modelrow{flex:0 0 100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:2px}
+.gd-modelrow[hidden]{display:none}
+.gd-model{background:#14171c;color:#e8eaed;border:1px solid #2a2f38;border-radius:8px;padding:5px 8px;font:inherit;font-size:12.5px;max-width:min(520px,100%)}
+.gd-minfo,.gd-shown{color:#9aa3af;font-size:12px}
 .gd-root.gd-full{position:fixed;inset:0;z-index:2147483000;height:100vh;padding:12px;background:#14171c}
 @media (max-width:820px){.gd-root{flex-direction:column;height:auto}.gd-side{width:auto;flex:none;max-height:260px}.gd-stage{height:70vh}}
 `;
@@ -1280,6 +1350,8 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
                 '<button type="button" data-v="auto" title="Pick automatically: wide diagrams run left to right">Auto</button>' +
                 '<button type="button" data-v="TD">\u2193 Down</button><button type="button" data-v="LR">\u2192 Right</button>' +
                 '<button type="button" data-v="BT">\u2191 Up</button><button type="button" data-v="RL">\u2190 Left</button></div></div>' +
+              '<div class="gd-mrow"><span class="gd-mlab">Theme</span><div class="gd-seg" data-k="theme">' +
+                '<button type="button" data-v="light">GitDiagram</button><button type="button" data-v="dark">Dark</button></div></div>' +
               '<div class="gd-mrow"><span class="gd-mlab">Lines</span><div class="gd-seg" data-k="curve">' +
                 '<button type="button" data-v="basis">Curved</button><button type="button" data-v="linear">Straight</button><button type="button" data-v="step">Stepped</button></div></div>' +
               '<div class="gd-mrow"><span class="gd-mlab">Spacing</span><div class="gd-seg" data-k="space">' +
@@ -1293,6 +1365,12 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
           '<button type="button" class="gd-btn gd-copy" title="Copy the Mermaid source">Copy source</button>' +
           '<button type="button" class="gd-btn gd-open" title="Open on GitHub">GitHub</button>' +
           '<button type="button" class="gd-btn gd-regen" hidden title="Rebuild this diagram now (AI mode uses API credit)">Regenerate</button>' +
+        '</div>' +
+        '<div class="gd-modelrow" hidden>' +
+          '<span class="gd-mlab" style="width:auto;flex:none">Analysis</span>' +
+          '<select class="gd-model" aria-label="Analysis model"></select>' +
+          '<button type="button" class="gd-btn gd-mcheck" title="Ask Google which Gemini models your key can use right now">\u21bb Check models</button>' +
+          '<span class="gd-minfo"></span><span class="gd-shown"></span>' +
         '</div>' +
       '</div>' +
       '<div class="gd-scroll"><div class="gd-flags"></div><div class="gd-stage"><div class="gd-note">Pick a repository on the left.</div></div><div class="gd-text"></div></div>' +
@@ -1336,7 +1414,7 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
   /*VIEWFN*/
-  var DEFAULT_VIEW = { dir: 'auto', curve: 'basis', space: 'normal', labels: true, ext: true, rot: 0 };
+  var DEFAULT_VIEW = { dir: 'auto', curve: 'basis', space: 'normal', labels: true, ext: true, rot: 0, theme: 'light' };
 
   function autoDir(src) {
     var m = /^flowchart\s+(TD|TB|LR|RL|BT)/m.exec(src);
@@ -1356,15 +1434,50 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     }).join('\n');
   }
 
+  var PALETTE = {
+    light: {   /* the pastel tones GitDiagram uses */
+      k_client: 'fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81',
+      k_service: 'fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#172554',
+      k_provider: 'fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#78350f',
+      k_external: 'fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81',
+      k_datastore: 'fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a',
+      k_sync: 'fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d',
+      k_job: 'fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337',
+      k_config: 'fill:#f8fafc,stroke:#334155,stroke-width:1.5px,color:#0f172a',
+      k_other: 'fill:#f8fafc,stroke:#334155,stroke-width:1.5px,color:#0f172a',
+      repo: 'fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#172554', dir: 'fill:#e0e7ff,stroke:#4f46e5,color:#312e81',
+      file: 'fill:#f8fafc,stroke:#334155,color:#0f172a', tool: 'fill:#dcfce7,stroke:#16a34a,color:#14532d',
+      svc: 'fill:#dbeafe,stroke:#2563eb,color:#172554', db: 'fill:#fef3c7,stroke:#d97706,color:#78350f',
+      ext: 'fill:#e0e7ff,stroke:#4f46e5,color:#312e81', more: 'fill:#fff8c5,stroke:#d4a72c,color:#4d2d00'
+    },
+    dark: {
+      k_client: 'fill:#2e1065,stroke:#a78bfa,color:#ede9fe', k_service: 'fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff,stroke-width:2px',
+      k_provider: 'fill:#422006,stroke:#d4a72c,color:#fef3c7', k_external: 'fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe',
+      k_datastore: 'fill:#431407,stroke:#f59e0b,color:#fde68a', k_sync: 'fill:#052e16,stroke:#22c55e,color:#dcfce7',
+      k_job: 'fill:#450a0a,stroke:#f87171,color:#fee2e2', k_config: 'fill:#1c2028,stroke:#64748b,color:#e2e8f0',
+      k_other: 'fill:#1c2028,stroke:#475569,color:#cbd5e1',
+      repo: 'fill:#1d4ed8,stroke:#60a5fa,color:#ffffff,stroke-width:2px', dir: 'fill:#172554,stroke:#3b82f6,color:#dbeafe',
+      file: 'fill:#1c2028,stroke:#3a414c,color:#cbd5e1', tool: 'fill:#052e16,stroke:#22c55e,color:#bbf7d0',
+      svc: 'fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff', db: 'fill:#431407,stroke:#f59e0b,color:#fde68a',
+      ext: 'fill:#0c4a6e,stroke:#06b6d4,color:#cffafe', more: 'fill:#422006,stroke:#d4a72c,color:#fef3c7'
+    }
+  };
+  var THEME_INIT = {
+    light: '"theme": "default", "themeVariables": {"lineColor": "#1f2937", "primaryTextColor": "#111827", "titleColor": "#111827", "clusterBkg": "#f7f7f7", "clusterBorder": "#d4d4d8", "edgeLabelBackground": "#f0e6ff"}',
+    dark: '"theme": "dark", "themeVariables": {"lineColor": "#7b8794", "primaryTextColor": "#e8eaed", "titleColor": "#cbd5e1", "clusterBkg": "#171b22", "clusterBorder": "#39414d", "edgeLabelBackground": "#1c2028"}'
+  };
+
   function viewSource(src, V) {
-    var s = src;
+    var s = src.replace(/^[ \t]*classDef .*$/gm, '');          // colours belong to the chosen theme, not the server
     if (!V.ext) s = dropExternals(s);
     if (!V.labels) s = s.replace(/(-->|-\.->|==>)\|[^|\n]*\|/g, '$1');
-    var dir = V.dir === 'auto' ? autoDir(s) : V.dir;
+    var dir = V.dir === 'auto' ? autoDir(src) : V.dir;     // decided on the full diagram so toggling options never flips the layout
     s = s.replace(/^flowchart\s+(?:TD|TB|LR|RL|BT)/m, 'flowchart ' + dir);
     var sp = { compact: [18, 34], normal: [32, 58], roomy: [56, 96] }[V.space] || [32, 58];
     var curve = { basis: 'basis', linear: 'linear', step: 'step' }[V.curve] || 'basis';
-    return '%%{init: {"flowchart": {"curve": "' + curve + '", "nodeSpacing": ' + sp[0] + ', "rankSpacing": ' + sp[1] + '}}}%%\n' + s;
+    var theme = PALETTE[V.theme] ? V.theme : 'light';
+    var defs = Object.keys(PALETTE[theme]).map(function (k) { return '  classDef ' + k + ' ' + PALETTE[theme][k]; }).join('\n');
+    return '%%{init: {' + THEME_INIT[theme] + ', "flowchart": {"curve": "' + curve + '", "nodeSpacing": ' + sp[0] + ', "rankSpacing": ' + sp[1] + '}}}%%\n' + s + '\n' + defs;
   }
   /*ENDVIEWFN*/
 
@@ -1475,8 +1588,9 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
       q('.gd-regen').hidden = true;
       note('Loading diagram...');
       var path = isOv ? 'overview' : 'repo/' + encodeURIComponent(id);
+      var pick = (!isOv && S.model) ? { model: S.model } : {};
       (function poll(extra) {
-        getJson(apiUrl(path, extra)).then(function (d) {
+        getJson(apiUrl(path, Object.assign({}, pick, extra || {}))).then(function (d) {
           if (tok !== S.token) return;                           // another repo was clicked meanwhile
           if (d.status === 'building') {
             note('Analyzing the repository with AI... ' + Math.round((Date.now() - started) / 1000) +
@@ -1485,7 +1599,13 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
             return;
           }
           show(d, isOv);
-        }).catch(function (e) { if (tok === S.token) note('Could not build this diagram: ' + e.message, true); });
+        }).catch(function (e) {
+          if (tok !== S.token) return;
+          if (S.model && /not in the available list/.test(e.message)) {   // saved choice no longer exists: use the default
+            S.model = ''; store('gd_model', ''); if (S.models) renderModels(S.models); select(id, {}); return;
+          }
+          note('Could not build this diagram: ' + e.message, true);
+        });
       })(o && o.regen ? { regen: 1 } : (o && o.refresh ? { refresh: 1 } : null));
     }
 
@@ -1495,6 +1615,11 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
       if (d.ai_error) flags.appendChild(el('div', 'gd-flag', 'The analysis failed (' + d.ai_error + '). Showing a simpler diagram instead; it will retry in a few minutes.'));
       else if (d.kind === 'tree') flags.appendChild(el('div', 'gd-flag', 'Simple file-structure diagram: this repository has too little code or compose structure to infer a flow.'));
       q('.gd-regen').hidden = isOv;
+      S.links = {};
+      if (d.blob_base && d.components) d.components.forEach(function (c, i) {
+        if (c.file) S.links['n' + i] = d.blob_base + c.file.split('/').map(encodeURIComponent).join('/');
+      });
+      q('.gd-shown').textContent = isOv ? '' : 'Showing: ' + (d.kind === 'ai' ? d.model : d.kind === 'static' ? 'built-in analysis' : 'file structure');
       draw(d.mermaid);
       renderText(d);
     }
@@ -1512,12 +1637,26 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
         svg.removeAttribute('height'); svg.removeAttribute('width'); svg.style.maxWidth = 'none';
         var wrap = el('div', 'gd-rot');
         stage.innerHTML = ''; wrap.appendChild(svg); stage.appendChild(wrap);
+        applyTheme(); wireLinks();
         fit();
       }).catch(function (e) {
         stage.innerHTML = '';
         stage.appendChild(el('div', 'gd-note gd-err', 'The diagram could not be drawn (' + (e.message || e) + '). Mermaid source is below.'));
         var pre = el('pre', null, src); pre.style.cssText = 'margin:0;padding:16px;color:#cbd5e1;font-size:12px;overflow:auto';
         stage.appendChild(pre);
+      });
+    }
+
+    function applyTheme() { stage.classList.toggle('gd-light', V.theme !== 'dark'); }
+    function wireLinks() {            // a node with a source file opens that file on GitHub
+      stage.querySelectorAll('g.node').forEach(function (g) {
+        var m = /flowchart-(.+)-\d+$/.exec(g.id || ''), u = m && S.links && S.links[m[1]];
+        if (!u) return;
+        g.style.cursor = 'pointer';
+        g.addEventListener('click', function (e) { e.stopPropagation(); if (!S.dragged) window.open(u, '_blank', 'noopener'); });
+        var t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        t.textContent = 'Open ' + decodeURIComponent(u.split('/').pop()) + ' on GitHub';
+        g.appendChild(t);
       });
     }
 
@@ -1605,8 +1744,8 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     menu.addEventListener('click', function (e) {
       e.stopPropagation();
       var b = e.target.closest('.gd-seg button');
-      if (b) { V[b.parentNode.getAttribute('data-k')] = b.getAttribute('data-v'); saveView(); syncMenu(); redraw(); return; }
-      if (e.target.closest('.gd-vreset')) { Object.keys(DEFAULT_VIEW).forEach(function (k) { V[k] = DEFAULT_VIEW[k]; }); saveView(); syncMenu(); redraw(); }
+      if (b) { V[b.parentNode.getAttribute('data-k')] = b.getAttribute('data-v'); saveView(); syncMenu(); applyTheme(); redraw(); return; }
+      if (e.target.closest('.gd-vreset')) { Object.keys(DEFAULT_VIEW).forEach(function (k) { V[k] = DEFAULT_VIEW[k]; }); saveView(); syncMenu(); applyTheme(); redraw(); }
     });
     menu.addEventListener('change', function (e) {
       var k = e.target.getAttribute('data-k');
@@ -1620,9 +1759,9 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     }, { passive: false });
     (function pan() {
       var down = false, x0 = 0, y0 = 0, l0 = 0, t0 = 0;
-      stage.addEventListener('mousedown', function (e) { if (e.button !== 0) return; down = true; x0 = e.clientX; y0 = e.clientY; l0 = stage.scrollLeft; t0 = stage.scrollTop; stage.classList.add('gd-drag'); });
+      stage.addEventListener('mousedown', function (e) { if (e.button !== 0) return; S.dragged = false; down = true; x0 = e.clientX; y0 = e.clientY; l0 = stage.scrollLeft; t0 = stage.scrollTop; stage.classList.add('gd-drag'); });
       window.addEventListener('mouseup', function () { down = false; stage.classList.remove('gd-drag'); });
-      window.addEventListener('mousemove', function (e) { if (down) { stage.scrollLeft = l0 - (e.clientX - x0); stage.scrollTop = t0 - (e.clientY - y0); } });
+      window.addEventListener('mousemove', function (e) { if (down) { if (Math.abs(e.clientX - x0) + Math.abs(e.clientY - y0) > 4) S.dragged = true; stage.scrollLeft = l0 - (e.clientX - x0); stage.scrollTop = t0 - (e.clientY - y0); } });
     })();
 
     /* ---- toolbar ---- */
@@ -1647,8 +1786,50 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     window.addEventListener('resize', function () { size(); if (S.base) fit(); });
     if (window.ResizeObserver) new ResizeObserver(function () { if (S.needFit && stage.clientWidth) { S.needFit = false; fit(); } }).observe(stage);
 
+    /* ---- analysis picker: Gemini models, kept current by the server every week ---- */
+    var STATUS_TEXT = { no_quota: 'no free quota', rate_limited: 'busy right now', denied: 'not allowed for this key', unavailable: 'not available', error: 'test failed' };
+    S.model = store('gd_model') || '';
+    function fmtDate(iso) { try { return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' }); } catch (e) { return ''; } }
+    function renderModels(info) {
+      var row = q('.gd-modelrow'), sel = q('.gd-model');
+      S.models = info;
+      if (!info || !info.enabled) { row.hidden = true; return; }       // the picker only exists when a Gemini key is configured
+      row.hidden = false; sel.innerHTML = '';
+      function opt(parent, v, label, title) { var o = document.createElement('option'); o.value = v; o.textContent = label; if (title) o.title = title; parent.appendChild(o); }
+      opt(sel, '', info.default ? 'Server default (' + info.default + ')' : 'Server default (built-in analysis)');
+      opt(sel, 'static', 'Built-in analysis (no AI, free)');
+      var grp = document.createElement('optgroup'); grp.label = 'Gemini models' + (info.updated_at ? ' (checked ' + fmtDate(info.updated_at) + ')' : '');
+      (info.models || []).forEach(function (m) {
+        var st = (m.probe && m.probe.status) || 'untested';
+        var mark = st === 'ok' ? '\u2713 ' : (st === 'untested' ? '\u00b7 ' : '\u2717 ');
+        opt(grp, m.id, mark + m.id + (m.recommended ? '  \u2605 recommended' : '') + (m.preview ? '  (preview)' : '') + (STATUS_TEXT[st] ? '  \u2013 ' + STATUS_TEXT[st] : ''),
+            (m.name || m.id) + (m.input_limit ? ' \u00b7 ' + Math.round(m.input_limit / 1000) + 'k tokens in' : ''));
+      });
+      sel.appendChild(grp);
+      var valid = Array.prototype.some.call(sel.options, function (o) { return o.value === S.model; });
+      if (!valid) { S.model = ''; store('gd_model', ''); }
+      sel.value = S.model;
+      q('.gd-minfo').textContent = (info.refreshing ? 'Checking Gemini now (about a minute)... ' : '') +
+        (info.updated_at ? 'Models checked ' + fmtDate(info.updated_at) : 'Models not checked yet') +
+        (info.next_refresh_at ? ' \u00b7 next check ' + fmtDate(info.next_refresh_at) : '') + (info.error ? ' \u00b7 last check failed' : '');
+    }
+    function loadModels(force) {
+      return getJson(apiUrl('models', force ? { refresh: 1 } : null)).then(function (info) {
+        renderModels(info);
+        if (info.refreshing) setTimeout(function () { loadModels(false).catch(function () { /* ignore */ }); }, 5000);
+        return info;
+      });
+    }
+    q('.gd-model').addEventListener('change', function () {
+      S.model = q('.gd-model').value; store('gd_model', S.model);
+      if (S.active && S.active !== OV) select(S.active, {});
+    });
+    q('.gd-mcheck').addEventListener('click', function () { loadModels(true).catch(function (e) { q('.gd-minfo').textContent = e.message; }); });
+    applyTheme();
+
     /* ---- start; then poll for new repos every 5 minutes ---- */
     size(); setTimeout(size, 400);
+    loadModels(false).catch(function () { /* picker stays hidden */ });
     loadRepos(false).then(function () {
       var last = store('gd_last');
       var ok = last && (last === OV || S.repos.some(function (r) { return r.name === last; }));
@@ -1665,3 +1846,7 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
   window.GitDiagrams = { mount: mount };
 })();
 """
+
+
+if gemini_models.enabled():
+    gemini_models.start()          # loads the saved list; refreshes it weekly (and now if it is stale)
