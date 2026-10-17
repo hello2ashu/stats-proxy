@@ -45,6 +45,7 @@ services:
       GIT_DIAGRAMS_LLM_URL: https://generativelanguage.googleapis.com/v1beta/openai
       GIT_DIAGRAMS_LLM_KEY: ${gemini_api_key}
       GIT_DIAGRAMS_LLM_MODEL: gemini-3.1-flash-lite
+      OPENROUTER_API_KEY: ${openrouter}
       HOMEPAGE_CONFIG: /config/services.yaml
       HOMEPAGE_GROUP: GitHub
       CALENDAR_URLS: |

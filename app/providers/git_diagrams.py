@@ -7,6 +7,7 @@ What you get
     subgraphs, labelled connections, a prose "How it works" summary and Components/Connections
     lists. Built once per repo, cached on disk, rebuilt automatically when the repo is pushed to.
   * without a key: a basic diagram from the file tree + docker compose + Dockerfile + CI
+  * model picker: Gemini models and (with OPENROUTER_API_KEY) OpenRouter free models, see gemini_models.py
 
 Routes (all handled by handle(); nothing else in proxy.py needs to know about them)
   GET /git-diagrams                 full-screen viewer page
@@ -29,6 +30,7 @@ Env vars
   GIT_DIAGRAMS_LIST_TTL_SECS    repo-list cache, default 600
   GIT_DIAGRAMS_TTL_SECS         basic-diagram cache, default 1800
   GIT_DIAGRAMS_DISABLED         set to turn the provider off
+  OPENROUTER_API_KEY            adds OpenRouter's free models to the picker (see gemini_models.py)
 """
 import hmac
 import io
@@ -106,7 +108,7 @@ def describe():
     return "user=%s, private=%s, key=%s, github_token=%s, ai=%s" % (
         USER, "yes" if PRIVATE_OK else "no", "required" if KEY else "none",
         "yes" if TOKEN else "no", (_default_model() or "auto (waiting for the Gemini model list)") if AI_ENABLED else
-        "off (built-in static analysis)" + (", Gemini picker on" if gemini_models.enabled() else ""))
+        "off (built-in static analysis)" + (", model picker on" if gemini_models.enabled() else ""))
 
 
 # ---- tiny thread-safe cache that serves stale data if GitHub is unreachable ------------------
@@ -499,12 +501,14 @@ def build_prompt(repo, paths, texts, budget=None):
 
 
 def _call_llm(system, user, model=None):
-    """Send the prompt to whichever backend serves `model` (Gemini list, a fixed OpenAI-style
-    endpoint, or Anthropic) and return the raw text answer."""
+    """Send the prompt to whichever backend serves `model` (Gemini / OpenRouter list, a fixed
+    OpenAI-style endpoint, or Anthropic) and return the raw text answer."""
     model = model or _default_model()
     if model and gemini_models.has(model):
-        base, key = gemini_models.connection()
-        return _call_openai_compat(system, user, base, key, model, gemini=True)
+        base, key = gemini_models.connection(model)
+        # JSON mode only for Gemini; many OpenRouter free models reject response_format
+        return _call_openai_compat(system, user, base, key, model,
+                                   gemini=gemini_models.provider_of(model) == "gemini")
     if LLM_KIND == "openai":
         return _call_openai_compat(system, user, LLM_URL, LLM_KEY, LLM_MODEL)
     if LLM_KIND == "anthropic":
@@ -674,8 +678,14 @@ def _resolve_mode(requested):
 
 
 def _budget_for(model):
-    """Characters of repository text to send. Gemini and Claude have large context windows."""
-    if (model and gemini_models.has(model)) or (LLM_KIND == "anthropic" and model == MODEL):
+    """Characters of repository text to send. Gemini and Claude have large context windows;
+    OpenRouter free models are sized from the context window the provider reports."""
+    if model and gemini_models.has(model):
+        if gemini_models.provider_of(model) == "gemini":
+            return max(MAX_PROMPT_CHARS, 90000)
+        ctx = gemini_models.input_limit(model) or 0
+        return int(min(90000, max(MAX_PROMPT_CHARS, ctx * 2)))
+    if LLM_KIND == "anthropic" and model == MODEL:
         return max(MAX_PROMPT_CHARS, 90000)
     return MAX_PROMPT_CHARS
 
@@ -1369,7 +1379,7 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
         '<div class="gd-modelrow" hidden>' +
           '<span class="gd-mlab" style="width:auto;flex:none">Analysis</span>' +
           '<select class="gd-model" aria-label="Analysis model"></select>' +
-          '<button type="button" class="gd-btn gd-mcheck" title="Ask Google which Gemini models your key can use right now">\u21bb Check models</button>' +
+          '<button type="button" class="gd-btn gd-mcheck" title="Ask Google and OpenRouter which models your keys can use right now">\u21bb Check models</button>' +
           '<span class="gd-minfo"></span><span class="gd-shown"></span>' +
         '</div>' +
       '</div>' +
@@ -1786,30 +1796,37 @@ VIEWER_JS = r"""/* Git Diagrams viewer. GitDiagrams.mount(element, {base, key, f
     window.addEventListener('resize', function () { size(); if (S.base) fit(); });
     if (window.ResizeObserver) new ResizeObserver(function () { if (S.needFit && stage.clientWidth) { S.needFit = false; fit(); } }).observe(stage);
 
-    /* ---- analysis picker: Gemini models, kept current by the server every week ---- */
+    /* ---- analysis picker: Gemini + OpenRouter free models, kept current by the server every week ---- */
     var STATUS_TEXT = { no_quota: 'no free quota', rate_limited: 'busy right now', denied: 'not allowed for this key', unavailable: 'not available', error: 'test failed' };
+    var GROUP_TITLES = { gemini: 'Gemini models', openrouter: 'OpenRouter free models' };
     S.model = store('gd_model') || '';
     function fmtDate(iso) { try { return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' }); } catch (e) { return ''; } }
     function renderModels(info) {
       var row = q('.gd-modelrow'), sel = q('.gd-model');
       S.models = info;
-      if (!info || !info.enabled) { row.hidden = true; return; }       // the picker only exists when a Gemini key is configured
+      if (!info || !info.enabled) { row.hidden = true; return; }       // the picker only exists when a Gemini or OpenRouter key is configured
       row.hidden = false; sel.innerHTML = '';
       function opt(parent, v, label, title) { var o = document.createElement('option'); o.value = v; o.textContent = label; if (title) o.title = title; parent.appendChild(o); }
       opt(sel, '', info.default ? 'Server default (' + info.default + ')' : 'Server default (built-in analysis)');
       opt(sel, 'static', 'Built-in analysis (no AI, free)');
-      var grp = document.createElement('optgroup'); grp.label = 'Gemini models' + (info.updated_at ? ' (checked ' + fmtDate(info.updated_at) + ')' : '');
+      var groups = {}, order = [];
       (info.models || []).forEach(function (m) {
+        var p = m.provider || 'gemini';
+        if (!groups[p]) {
+          groups[p] = document.createElement('optgroup');
+          groups[p].label = (GROUP_TITLES[p] || p) + (info.updated_at ? ' (checked ' + fmtDate(info.updated_at) + ')' : '');
+          order.push(p);
+        }
         var st = (m.probe && m.probe.status) || 'untested';
         var mark = st === 'ok' ? '\u2713 ' : (st === 'untested' ? '\u00b7 ' : '\u2717 ');
-        opt(grp, m.id, mark + m.id + (m.recommended ? '  \u2605 recommended' : '') + (m.preview ? '  (preview)' : '') + (STATUS_TEXT[st] ? '  \u2013 ' + STATUS_TEXT[st] : ''),
+        opt(groups[p], m.id, mark + m.id + (m.recommended ? '  \u2605 recommended' : '') + (m.preview ? '  (preview)' : '') + (STATUS_TEXT[st] ? '  \u2013 ' + STATUS_TEXT[st] : ''),
             (m.name || m.id) + (m.input_limit ? ' \u00b7 ' + Math.round(m.input_limit / 1000) + 'k tokens in' : ''));
       });
-      sel.appendChild(grp);
+      order.forEach(function (p) { sel.appendChild(groups[p]); });
       var valid = Array.prototype.some.call(sel.options, function (o) { return o.value === S.model; });
       if (!valid) { S.model = ''; store('gd_model', ''); }
       sel.value = S.model;
-      q('.gd-minfo').textContent = (info.refreshing ? 'Checking Gemini now (about a minute)... ' : '') +
+      q('.gd-minfo').textContent = (info.refreshing ? 'Checking models now (about a minute)... ' : '') +
         (info.updated_at ? 'Models checked ' + fmtDate(info.updated_at) : 'Models not checked yet') +
         (info.next_refresh_at ? ' \u00b7 next check ' + fmtDate(info.next_refresh_at) : '') + (info.error ? ' \u00b7 last check failed' : '');
     }
